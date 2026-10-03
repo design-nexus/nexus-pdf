@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=Nexus PDF
+GenericName=PDF Viewer
+Comment=Read, mark up, fill in and sign PDF files, and reorder their pages
+Exec=pdf %U
+Icon=io.github.design_nexus.Pdf
+Terminal=false
+Categories=Office;Viewer;GTK;
+Keywords=pdf;document;reader;viewer;annotate;highlight;sign;form;pages;merge;
+MimeType=application/pdf;
+StartupNotify=true
+StartupWMClass=io.github.design_nexus.Pdf
+SingleMainWindow=true
+DBusActivatable=false
