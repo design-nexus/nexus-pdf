@@ -3,7 +3,12 @@
 - The command is `pdf`; everything else (crate, config/data/cache folders) is `nexus-pdf`.
   App id `io.github.design_nexus.Pdf`.
 
-- GTK4 (gtk4-rs 0.11) + Rust, no libadwaita. Follows `~/Projects/STYLE.md`; the shell
+- GTK4 (gtk4-rs 0.11) + Rust, no libadwaita. The window is one flat, monospace surface
+  split by hairlines: a top bar (sidebar toggle, `PDF / <page>`, search, settings, close),
+  the sidebar, the page and a status bar (`F1 Shortcuts` · open file and page); fullscreen
+  hides all of it. Pages have no title header. Settings is a card over the window
+  (`settings_dialog.rs`) listing the settings page's groups; `navigate("settings")` opens
+  it. The shell
   (`theme.rs`, `prefs.rs`, `widgets.rs`, `window.rs`, `style.css`, installers) started as
   copies of Nexus Media Player (`~/Projects/nexus-media-player`). Every colour is a
   `@theme_*` token. The only fixed colours are page-content ones: form-field paper and

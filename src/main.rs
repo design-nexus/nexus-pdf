@@ -7,6 +7,7 @@ mod paths;
 mod prefs;
 mod recent;
 mod sections;
+mod settings_dialog;
 #[cfg(test)]
 mod testpdf;
 mod theme;

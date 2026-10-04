@@ -26,8 +26,8 @@ pub fn build(page: &Page) {
         |v| prefs::update(|p| p.default_zoom = v),
     ));
     g.add(&widgets::segmented_row(
-        "Page colours",
-        "Recolour pages to the theme for reading at night. Pictures are recoloured too.",
+        "Page colors",
+        "Recolor pages to the theme for reading at night. Pictures are recolored too.",
         widgets::opts(&[("off", "Off"), ("invert", "Invert"), ("tint", "Theme tint")]),
         &p.page_colors,
         |v| {
@@ -66,7 +66,7 @@ pub fn build(page: &Page) {
         prefs::update(|p| p.author = text);
     });
     g.add(&widgets::row("Author name", "Stored on the notes and markup you add.", Some(author.upcast_ref())));
-    g.add(&widgets::row("Highlight colour", "The colour new highlights start with.", Some(crate::viewer::colour::pref_row().upcast_ref())));
+    g.add(&widgets::row("Highlight color", "The color new highlights start with.", Some(crate::viewer::colour::pref_row().upcast_ref())));
     let sigs = paths::signatures_dir();
     let n = std::fs::read_dir(&sigs).map(|d| d.flatten().count()).unwrap_or(0);
     let desc = format!("{} saved. They live in <tt>{}</tt>.", fmt::count(n, "signature", "signatures"), glib::markup_escape_text(&paths::pretty(&sigs)));
@@ -119,7 +119,7 @@ pub fn build(page: &Page) {
         let dd = theme_dd.clone();
         let (r, _) = widgets::switch_row(
             "Follow Omarchy theme",
-            "Match the desktop's colours and update live whenever the Omarchy theme changes.",
+            "Match the desktop's colors and update live whenever the Omarchy theme changes.",
             p.mode == prefs::ThemeMode::Omarchy,
             move |on| {
                 prefs::update(|p| p.mode = if on { prefs::ThemeMode::Omarchy } else { prefs::ThemeMode::Theme });
@@ -152,7 +152,7 @@ pub fn build(page: &Page) {
     };
     refresh_swatches();
     theme::subscribe(&swatches, refresh_swatches);
-    g.add(&widgets::row("Current colours", "", Some(swatches.upcast_ref())));
+    g.add(&widgets::row("Current colors", "", Some(swatches.upcast_ref())));
 
     let (r, _) = widgets::switch_row("Glow", "Soft accent glow around focused and selected elements.", p.glow, |on| {
         prefs::update(|p| p.glow = on);
@@ -168,44 +168,7 @@ pub fn build(page: &Page) {
 
     // ----- Keyboard -----
     let g = page.group("Keyboard");
-    for (keys, what) in [
-        (&["Ctrl", "O"][..], "Open files (each in its own tab)"),
-        (&["Ctrl", "S"][..], "Save"),
-        (&["Ctrl", "Shift", "S"][..], "Save a copy as…"),
-        (&["Ctrl", "P"][..], "Print"),
-        (&["Ctrl", "W"][..], "Close the file"),
-        (&["Ctrl", "Tab"][..], "Next file (with Shift, the one before)"),
-        (&["Ctrl", "Z"][..], "Undo"),
-        (&["Ctrl", "Shift", "Z"][..], "Redo"),
-        (&["Ctrl", "C"][..], "Copy the selected text"),
-        (&["Ctrl", "F"][..], "Search the document"),
-        (&["Ctrl", "+"][..], "Zoom in"),
-        (&["Ctrl", "−"][..], "Zoom out"),
-        (&["Ctrl", "0"][..], "Fit width"),
-        (&["Ctrl", "9"][..], "Fit page"),
-        (&["PgUp"][..], "Previous page (also K, Shift+Space)"),
-        (&["PgDn"][..], "Next page (also J, Space)"),
-        (&["Home"][..], "First page"),
-        (&["End"][..], "Last page"),
-        (&["Alt", "←"][..], "Back to where you were (after a link)"),
-        (&["Alt", "→"][..], "Forward again"),
-        (&["F5"][..], "Present"),
-        (&["F9"][..], "Show or hide the side panel"),
-        (&["F11"][..], "Fullscreen"),
-        (&["Ctrl", "B"][..], "Collapse or expand the sidebar"),
-        (&["V"][..], "Select tool"),
-        (&["H"][..], "Highlight tool"),
-        (&["U"][..], "Underline tool"),
-        (&["X"][..], "Strike-out tool"),
-        (&["D"][..], "Draw tool"),
-        (&["N"][..], "Note tool"),
-        (&["T"][..], "Text box tool"),
-        (&["E"][..], "Edit text tool"),
-        (&["S"][..], "Signature tool"),
-        (&["Delete"][..], "Delete the selected markup"),
-        (&["Esc"][..], "Back to Select, close the search, or stop presenting"),
-        (&["Ctrl", "Q"][..], "Quit"),
-    ] {
+    for (keys, what) in crate::window::SHORTCUTS {
         g.add(&widgets::row(what, "", Some(widgets::key_caps(keys).upcast_ref())));
     }
     g.note("Open a file from a terminal or a binding with <tt>pdf FILE</tt>, and jump to a page with <tt>pdf FILE --page 12</tt>.");

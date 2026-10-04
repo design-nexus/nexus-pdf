@@ -354,7 +354,7 @@ impl View {
 
         // The colour (and the tool's other settings) for new markup.
         let colour_btn = gtk::MenuButton::new();
-        colour_btn.set_tooltip_text(Some("Colour and settings for this tool"));
+        colour_btn.set_tooltip_text(Some("Color and settings for this tool"));
         colour_btn.add_css_class("colour-button");
         colour_btn.set_valign(gtk::Align::Center);
         colour_btn.set_margin_start(6);
@@ -1198,7 +1198,7 @@ impl View {
                 v.set_colour(&hex);
             }
         });
-        self.options.append(&widgets::label("Colour", "popover-title"));
+        self.options.append(&widgets::label("Color", "popover-title"));
         self.options.append(&row);
         *self.colour_row.borrow_mut() = Some(row);
         let p = prefs::get();

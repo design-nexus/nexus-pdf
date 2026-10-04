@@ -2,7 +2,7 @@
 
 A PDF viewer and editor for [Omarchy](https://omarchy.org). It opens a file quickly,
 remembers the page you were on, and lets you mark it up, fill it in, sign it and
-rearrange its pages. It takes its colours from your Omarchy theme and fits a
+rearrange its pages. It takes its colors from your Omarchy theme and fits a
 half-screen tile.
 
 ## What it does
@@ -20,7 +20,7 @@ half-screen tile.
     found, with <kbd>Enter</kbd> and <kbd>Shift</kbd>+<kbd>Enter</kbd> to step through
     them. Match case and whole words are options, and notes and text boxes are searched
     too.
-  - **Page colours:** invert the pages, or tint them with your theme, for reading at
+  - **Page colors:** invert the pages, or tint them with your theme, for reading at
     night.
   - **Present** (<kbd>F5</kbd>): full screen, one page at a time; click or press
     <kbd>→</kbd> to go on.
@@ -29,15 +29,15 @@ half-screen tile.
     by date or by name.
 - **Markup:** highlight, underline and strike out text, draw freehand, add notes and
   text boxes. They're saved as ordinary PDF annotations, so other viewers show them.
-  Click one to change its colour or text, move it, resize it by its corner, or delete
-  it. The colour button sets each tool's colour, highlight opacity, pen width and text
+  Click one to change its color or text, move it, resize it by its corner, or delete
+  it. The color button sets each tool's color, highlight opacity, pen width and text
   size.
 - **Forms:** fill in text fields (one line or several), check boxes and drop-downs, or
   clear the whole form.
 - **Signatures:** draw a signature, or use a picture of one, and place it anywhere. Saved
   signatures are kept for next time.
 - **Edit text:** drag over words and type their replacement. The new text is written over
-  the old words on a patch of the page's colour, in the closest standard font. The
+  the old words on a patch of the page's color, in the closest standard font. The
   original text stays in the file underneath.
 - **Pages:** reorder by dragging, rotate, delete, add the pages of another PDF (or drop
   PDFs between the pages), save some pages as a new file, or combine several PDFs into
@@ -96,6 +96,7 @@ Launching it again while it's running opens the file in a new tab of the existin
 | <kbd>Delete</kbd> | Delete the selected annotation |
 | <kbd>F5</kbd> | Present |
 | <kbd>F9</kbd> / <kbd>F11</kbd> | Side panel / fullscreen |
+| <kbd>F1</kbd> | All keyboard shortcuts |
 | <kbd>Ctrl</kbd>+<kbd>B</kbd> | Collapse or expand the sidebar (it's collapsed while reading, by default) |
 | <kbd>Esc</kbd> | Stop presenting, close the search, clear the selection, or go back to Select |
 | <kbd>Ctrl</kbd>+<kbd>Q</kbd> | Quit |
