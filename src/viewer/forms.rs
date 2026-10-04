@@ -5,7 +5,7 @@ use super::pageview::PageView;
 use crate::doc::links::{self, Field};
 use crate::doc::{self, Doc};
 use gtk::prelude::*;
-use poppler::{FormButtonType, FormFieldType};
+use poppler::{FormButtonType, FormFieldType, FormTextType};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -42,6 +42,37 @@ fn widget_for(f: &Field) -> Option<gtk::Widget> {
     let id = f.field.id();
     let name = f.field.partial_name().map(|n| n.to_string()).unwrap_or_else(|| "that field".into());
     match f.field.field_type() {
+        FormFieldType::Text if f.field.text_get_text_type() == FormTextType::Multiline => {
+            let initial = f.field.text_get_text().map(|t| t.to_string()).unwrap_or_default();
+            let tv = gtk::TextView::new();
+            tv.set_wrap_mode(gtk::WrapMode::WordChar);
+            tv.add_css_class("form-text");
+            tv.buffer().set_text(&initial);
+            let scroll = gtk::ScrolledWindow::builder()
+                .hscrollbar_policy(gtk::PolicyType::Never)
+                .vscrollbar_policy(gtk::PolicyType::External)
+                .child(&tv)
+                .build();
+            scroll.set_tooltip_text(f.field.alternate_ui_name().as_deref());
+            let last = Rc::new(RefCell::new(initial));
+            let focus = gtk::EventControllerFocus::new();
+            let tv2 = tv.clone();
+            focus.connect_leave(move |_| {
+                let b = tv2.buffer();
+                let text = b.text(&b.start_iter(), &b.end_iter(), false).to_string();
+                if *last.borrow() == text {
+                    return;
+                }
+                *last.borrow_mut() = text.clone();
+                commit(&name, move |pdf| {
+                    if let Some(field) = pdf.form_field(id) {
+                        field.text_set_text(&text);
+                    }
+                });
+            });
+            tv.add_controller(focus);
+            Some(scroll.upcast())
+        }
         FormFieldType::Text => {
             let initial = f.field.text_get_text().map(|t| t.to_string()).unwrap_or_default();
             let entry = gtk::Entry::new();

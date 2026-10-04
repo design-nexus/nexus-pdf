@@ -24,18 +24,36 @@ pub struct Prefs {
     pub last_section: String,
     /// The sidebar shows only icons, whatever the window width.
     pub sidebar_collapsed: bool,
+    /// The same, while reading a document (where the page wants the room).
+    pub sidebar_reading_collapsed: bool,
     /// fit-width, fit-page or 100.
     pub default_zoom: String,
     /// How pages are coloured: off, invert or tint.
     pub page_colors: String,
     /// Pages scroll as one column (otherwise one page at a time).
     pub continuous: bool,
+    /// Pages side by side: single, pairs, or book (page one alone, then pairs).
+    pub spread: String,
+    /// The side panel is shown (on wide windows).
+    pub panel_visible: bool,
+    /// The side panel's tab: thumbs, outline or markup.
+    pub panel_tab: String,
+    /// The side panel's width, in pixels.
+    pub panel_width: i32,
     /// Open each file on the page it was left on.
     pub remember_page: bool,
     /// Name stored on annotations.
     pub author: String,
     /// Default markup colour, `#rrggbb`.
     pub highlight_color: String,
+    /// How opaque new highlights are, 0.1 to 1.
+    pub highlight_opacity: f64,
+    /// Pen width for drawings, in points.
+    pub ink_width: f64,
+    /// Font size for text boxes, in points.
+    pub text_size: f64,
+    /// Library order: recent or name.
+    pub library_sort: String,
 }
 
 impl Default for Prefs {
@@ -47,12 +65,21 @@ impl Default for Prefs {
             glow: true,
             last_section: "library".into(),
             sidebar_collapsed: false,
+            sidebar_reading_collapsed: true,
             default_zoom: "fit-width".into(),
             page_colors: "off".into(),
             continuous: true,
+            spread: "single".into(),
+            panel_visible: true,
+            panel_tab: "thumbs".into(),
+            panel_width: 236,
             remember_page: true,
             author: String::new(),
             highlight_color: "#ffd60a".into(),
+            highlight_opacity: 1.0,
+            ink_width: 2.0,
+            text_size: 12.0,
+            library_sort: "recent".into(),
         }
     }
 }

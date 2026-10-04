@@ -56,6 +56,7 @@ pub fn present(app: &gtk::Application, section: Option<&str>) {
         ui.borrow().window.present();
     }
     viewer::run_script_from_env();
+    doc::offer_recovery();
     if prefs::take_broken() {
         toast("Your settings file couldn't be read, so defaults are in use. The old file is kept as settings.toml.bak.");
     }
@@ -71,7 +72,7 @@ fn install_icons() {
     }
     const ICONS: &[(&str, &str)] = icons![
         "library", "document", "pages", "select", "highlight", "underline", "strike", "ink", "note", "textbox", "edit-text",
-        "sign", "fit-width", "fit-page", "thumbs", "outline", "rotate-left", "rotate-right",
+        "sign", "fit-width", "fit-page", "thumbs", "outline", "rotate-left", "rotate-right", "layout",
     ];
     let dir = crate::paths::cache_dir().join("icons");
     for (name, svg) in ICONS {
@@ -186,16 +187,37 @@ fn build(app: &gtk::Application) {
     install_keys(&window, &search);
     window.connect_fullscreened_notify(|w| apply_fullscreen(w.is_fullscreen()));
     window.connect_close_request(|w| {
-        if FORCE_CLOSE.with(|f| f.get()) || !doc::current().is_some_and(|d| d.dirty()) {
+        if FORCE_CLOSE.with(|f| f.get()) || !doc::all().iter().any(|d| d.dirty()) {
             return glib::Propagation::Proceed;
         }
         let w = w.clone();
-        doc::guard_unsaved(move || {
+        doc::guard_all(move || {
             FORCE_CLOSE.with(|f| f.set(true));
             w.close();
         });
         glib::Propagation::Stop
     });
+
+    // Drop PDFs anywhere on the window to open them.
+    let drop = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
+    drop.connect_drop(|_, value, _, _| {
+        let Ok(list) = value.get::<gdk::FileList>() else { return false };
+        let mut any = false;
+        for f in list.files() {
+            if let Some(p) = f.path() {
+                let pdf = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
+                if pdf {
+                    doc::request_open(p, None);
+                    any = true;
+                }
+            }
+        }
+        if !any {
+            toast("Only PDF files can be opened.");
+        }
+        any
+    });
+    window.add_controller(drop);
     search.connect_search_changed(|e| on_search(&e.text()));
     search.connect_stop_search(|e| e.set_text(""));
 
@@ -239,11 +261,18 @@ fn build(app: &gtk::Application) {
     });
 }
 
+/// While reading, the sidebar has its own collapsed state (icons only, by default),
+/// so the page gets the room; elsewhere it follows `sidebar_collapsed`.
+fn collapsed_here() -> bool {
+    let p = prefs::get();
+    if current() == "document" { p.sidebar_reading_collapsed } else { p.sidebar_collapsed }
+}
+
 /// The sidebar shows only icons when the window is narrow or the user collapsed it.
 fn refresh_compact() {
     let Some(ui) = ui() else { return };
     let nav = ui.borrow().nav.clone();
-    let compact = narrow() || prefs::get().sidebar_collapsed;
+    let compact = narrow() || collapsed_here();
     if compact {
         nav.add_css_class("compact");
     } else {
@@ -253,7 +282,14 @@ fn refresh_compact() {
 }
 
 pub fn toggle_sidebar() {
-    prefs::update(|p| p.sidebar_collapsed = !p.sidebar_collapsed);
+    let reading = current() == "document";
+    prefs::update(|p| {
+        if reading {
+            p.sidebar_reading_collapsed = !p.sidebar_reading_collapsed;
+        } else {
+            p.sidebar_collapsed = !p.sidebar_collapsed;
+        }
+    });
     refresh_compact();
 }
 
@@ -297,10 +333,23 @@ fn install_keys(window: &gtk::ApplicationWindow, search: &gtk::SearchEntry) {
         });
         let stop = glib::Propagation::Stop;
         let k = key.to_lower();
+        let in_doc = current() == "document" && doc::current().is_some();
+        // Presenting: arrows, space and the page keys move through the pages; Esc leaves.
+        if viewer::is_presenting() {
+            match key {
+                gdk::Key::Right | gdk::Key::Down | gdk::Key::space | gdk::Key::Page_Down | gdk::Key::Return | gdk::Key::n => viewer::step_page(1),
+                gdk::Key::Left | gdk::Key::Up | gdk::Key::BackSpace | gdk::Key::Page_Up | gdk::Key::p => viewer::step_page(-1),
+                gdk::Key::Home => viewer::goto_page(0),
+                gdk::Key::End => viewer::goto_page(usize::MAX),
+                gdk::Key::Escape | gdk::Key::F5 | gdk::Key::q => viewer::toggle_presenting(),
+                _ => return glib::Propagation::Proceed,
+            }
+            return stop;
+        }
         if ctrl {
             return match k {
                 gdk::Key::f => {
-                    if current() == "document" && doc::current().is_some() {
+                    if in_doc {
                         viewer::focus_search();
                     } else {
                         navigate("library");
@@ -314,6 +363,10 @@ fn install_keys(window: &gtk::ApplicationWindow, search: &gtk::SearchEntry) {
                 }
                 gdk::Key::o => {
                     doc::open_dialog();
+                    stop
+                }
+                gdk::Key::p => {
+                    doc::print();
                     stop
                 }
                 gdk::Key::s if shift => {
@@ -337,6 +390,22 @@ fn install_keys(window: &gtk::ApplicationWindow, search: &gtk::SearchEntry) {
                     stop
                 }
                 gdk::Key::c if !typing && current() == "document" && viewer::copy_selection() => stop,
+                gdk::Key::Tab | gdk::Key::ISO_Left_Tab => {
+                    doc::cycle(if shift || key == gdk::Key::ISO_Left_Tab { -1 } else { 1 });
+                    stop
+                }
+                gdk::Key::Page_Down => {
+                    doc::cycle(1);
+                    stop
+                }
+                gdk::Key::Page_Up => {
+                    doc::cycle(-1);
+                    stop
+                }
+                gdk::Key::w if doc::current().is_some() => {
+                    viewer::close_file();
+                    stop
+                }
                 gdk::Key::q | gdk::Key::w => {
                     w2.close();
                     stop
@@ -353,28 +422,45 @@ fn install_keys(window: &gtk::ApplicationWindow, search: &gtk::SearchEntry) {
                     viewer::zoom_fit("fit-width");
                     stop
                 }
+                gdk::Key::_9 | gdk::Key::KP_9 => {
+                    viewer::zoom_fit("fit-page");
+                    stop
+                }
                 _ => glib::Propagation::Proceed,
             };
+        }
+        if alt && in_doc {
+            match key {
+                gdk::Key::Left => viewer::go_back(),
+                gdk::Key::Right => viewer::go_forward(),
+                _ => return glib::Propagation::Proceed,
+            }
+            return stop;
         }
         match key {
             gdk::Key::F9 => viewer::toggle_panel(),
             gdk::Key::F11 => toggle_fullscreen(),
+            gdk::Key::F5 if in_doc => viewer::toggle_presenting(),
             gdk::Key::Escape if w2.is_fullscreen() => set_fullscreen(false),
             gdk::Key::Escape if !s2.text().is_empty() => s2.set_text(""),
             gdk::Key::Escape if !typing && current() == "document" => viewer::escape(),
             gdk::Key::Delete | gdk::Key::BackSpace if !typing && current() == "document" && viewer::delete_selected() => {}
-            _ if typing || alt || current() != "document" => return glib::Propagation::Proceed,
+            _ if typing || alt || !in_doc => return glib::Propagation::Proceed,
             gdk::Key::Page_Down | gdk::Key::space if !shift => viewer::step_page(1),
             gdk::Key::Page_Up => viewer::step_page(-1),
-            gdk::Key::Home => viewer::goto_page(0),
-            gdk::Key::End => viewer::goto_page(usize::MAX),
+            gdk::Key::space => viewer::step_page(-1),
+            gdk::Key::Home => viewer::jump(0),
+            gdk::Key::End => viewer::jump(usize::MAX),
             _ => match k {
                 gdk::Key::v => viewer::set_tool(viewer::Tool::Select),
                 gdk::Key::h => viewer::set_tool(viewer::Tool::Highlight),
+                gdk::Key::u => viewer::set_tool(viewer::Tool::Underline),
+                gdk::Key::x => viewer::set_tool(viewer::Tool::Strike),
                 gdk::Key::d => viewer::set_tool(viewer::Tool::Ink),
                 gdk::Key::n => viewer::set_tool(viewer::Tool::Note),
                 gdk::Key::t => viewer::set_tool(viewer::Tool::TextBox),
                 gdk::Key::e => viewer::set_tool(viewer::Tool::EditText),
+                gdk::Key::s => viewer::set_tool(viewer::Tool::Sign),
                 gdk::Key::j => viewer::step_page(1),
                 gdk::Key::k => viewer::step_page(-1),
                 _ => return glib::Propagation::Proceed,
@@ -403,12 +489,17 @@ pub fn set_fullscreen(on: bool) {
 /// Fullscreen hides the sidebar.
 fn apply_fullscreen(on: bool) {
     let Some(ui) = ui() else { return };
-    let u = ui.borrow();
-    u.nav.set_visible(!on);
-    if on {
-        u.window.add_css_class("fullscreen");
-    } else {
-        u.window.remove_css_class("fullscreen");
+    {
+        let u = ui.borrow();
+        u.nav.set_visible(!on);
+        if on {
+            u.window.add_css_class("fullscreen");
+        } else {
+            u.window.remove_css_class("fullscreen");
+        }
+    }
+    if !on {
+        viewer::on_unfullscreen();
     }
 }
 
@@ -487,9 +578,13 @@ pub fn navigate(id: &str) {
         b.add_css_class("active");
     }
     u.stack.set_visible_child_name(&id);
+    let changed = u.current != id;
     u.current = id.clone();
     drop(u);
     prefs::update(|p| p.last_section = id);
+    if changed {
+        refresh_compact();
+    }
 }
 
 /// Show a short message at the bottom of the window.

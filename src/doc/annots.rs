@@ -43,6 +43,11 @@ impl Kind {
         matches!(self, Kind::Note | Kind::FreeText | Kind::Edit | Kind::Stamp)
     }
 
+    /// Can be resized by its corner handle.
+    pub fn resizable(self) -> bool {
+        matches!(self, Kind::FreeText | Kind::Edit | Kind::Stamp)
+    }
+
     /// Has text the user can change.
     pub fn has_text(self) -> bool {
         matches!(self, Kind::Note | Kind::FreeText | Kind::Edit)
@@ -433,7 +438,15 @@ fn bounds(points: impl Iterator<Item = (f64, f64)>) -> Rect {
 }
 
 /// Highlight, underline or strike-out over the given text rectangles.
-pub fn add_markup(doc: &mut Document, page: ObjectId, kind: Kind, rects: &[Rect], colour: [f32; 3], author: &str) -> Result<ObjectId> {
+pub fn add_markup(
+    doc: &mut Document,
+    page: ObjectId,
+    kind: Kind,
+    rects: &[Rect],
+    colour: [f32; 3],
+    opacity: f64,
+    author: &str,
+) -> Result<ObjectId> {
     let subtype = match kind {
         Kind::Highlight => "Highlight",
         Kind::Underline => "Underline",
@@ -455,6 +468,9 @@ pub fn add_markup(doc: &mut Document, page: ObjectId, kind: Kind, rects: &[Rect]
     }
     let mut d = base_dict(subtype, bb, colour, "", author);
     d.set("QuadPoints", reals(&points));
+    if opacity < 0.999 {
+        d.set("CA", real(opacity.clamp(0.05, 1.0)));
+    }
     let id = doc.add_object(d);
     rebuild_ap(doc, page, id)?;
     push_annot(doc, page, id)?;
@@ -605,9 +621,13 @@ pub fn rebuild_ap(doc: &mut Document, page: ObjectId, id: ObjectId) -> Result<()
             let pts = d.get(b"QuadPoints").ok().map(|o| nums(doc, o)).unwrap_or_default();
             let mut c = String::new();
             let mut resources = Dictionary::new();
+            let opacity = d.get(b"CA").ok().and_then(num).unwrap_or(1.0);
             if subtype == b"Highlight" {
                 c.push_str(&format!("/GS gs {} rg\n", c3(colour)));
-                resources.set("ExtGState", dictionary! { "GS" => dictionary! { "Type" => "ExtGState", "BM" => "Multiply" } });
+                resources.set(
+                    "ExtGState",
+                    dictionary! { "GS" => dictionary! { "Type" => "ExtGState", "BM" => "Multiply", "ca" => real(opacity), "CA" => real(opacity) } },
+                );
             }
             for q in pts.as_chunks::<8>().0 {
                 // Points are top-left, top-right, bottom-left, bottom-right.
@@ -775,6 +795,19 @@ pub fn set_colour(doc: &mut Document, page: ObjectId, id: ObjectId, colour: [f32
     rebuild_ap(doc, page, id)
 }
 
+/// Give an annotation a new box (`view`, on the displayed page) and redraw it to fit.
+/// Pictures are scaled by the viewer, which maps their appearance onto the box.
+pub fn set_rect(doc: &mut Document, page: ObjectId, id: ObjectId, view: Rect) -> Result<()> {
+    let geom = page_geom(doc, page);
+    let pdf = geom.rect_to_pdf(&view);
+    {
+        let d = doc.get_dictionary_mut(id)?;
+        d.set("Rect", reals(&[pdf.x0, pdf.y0, pdf.x1, pdf.y1]));
+        d.set("M", text_object(&pdf_date()));
+    }
+    rebuild_ap(doc, page, id)
+}
+
 /// Slide an annotation by (`dx`, `dy`) points on the displayed page.
 pub fn move_by(doc: &mut Document, page: ObjectId, id: ObjectId, dx: f64, dy: f64) -> Result<()> {
     let geom = page_geom(doc, page);
@@ -832,7 +865,7 @@ mod tests {
     fn highlight_is_drawn_and_listed() {
         let (dir, mut doc, page) = setup("hl", None);
         // Over "Hello" on the displayed page (text is at y-down 75..97, x 100..155).
-        let id = add_markup(&mut doc, page, Kind::Highlight, &[Rect::new(100.0, 75.0, 155.0, 97.0)], [1.0, 0.0, 0.0], "Ken").unwrap();
+        let id = add_markup(&mut doc, page, Kind::Highlight, &[Rect::new(100.0, 75.0, 155.0, 97.0)], [1.0, 0.0, 0.0], 1.0, "Ken").unwrap();
         let file = dir.join("out.pdf");
         doc.save(&file).unwrap();
         let loaded = Document::load(&file).unwrap();
@@ -852,7 +885,7 @@ mod tests {
     fn highlight_on_rotated_page_lands_on_the_text() {
         let (dir, mut doc, page) = setup("hl90", Some(90));
         // On the 90° page the displayed text runs down the page at x 695..717.
-        add_markup(&mut doc, page, Kind::Highlight, &[Rect::new(695.0, 100.0, 717.0, 155.0)], [0.0, 0.0, 1.0], "").unwrap();
+        add_markup(&mut doc, page, Kind::Highlight, &[Rect::new(695.0, 100.0, 717.0, 155.0)], [0.0, 0.0, 1.0], 1.0, "").unwrap();
         let file = dir.join("out.pdf");
         doc.save(&file).unwrap();
         let (r, g, b) = pixel(&file, 697, 128);

@@ -1,6 +1,7 @@
 //! Running external commands without blocking the UI thread.
 
 use anyhow::{Context, Result};
+use gtk::prelude::*;
 use gtk::{gio, glib};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -61,4 +62,33 @@ pub fn atomic_write(path: &Path, contents: &str) -> Result<()> {
     std::fs::write(&tmp, contents)?;
     std::fs::rename(&tmp, path).with_context(|| format!("could not write {}", path.display()))?;
     Ok(())
+}
+
+/// Show a file selected in the file manager (over D-Bus), or open its folder.
+pub fn show_in_folder(path: &Path) {
+    let uri = gio::File::for_path(path).uri().to_string();
+    let parent = path.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    gio::bus_get(gio::BusType::Session, gio::Cancellable::NONE, move |bus| {
+        let Ok(bus) = bus else {
+            spawn(&["xdg-open", &parent]);
+            return;
+        };
+        let args = (vec![uri], String::new()).to_variant();
+        bus.call(
+            Some("org.freedesktop.FileManager1"),
+            "/org/freedesktop/FileManager1",
+            "org.freedesktop.FileManager1",
+            "ShowItems",
+            Some(&args),
+            None,
+            gio::DBusCallFlags::NONE,
+            2000,
+            gio::Cancellable::NONE,
+            move |res| {
+                if res.is_err() {
+                    spawn(&["xdg-open", &parent]);
+                }
+            },
+        );
+    });
 }

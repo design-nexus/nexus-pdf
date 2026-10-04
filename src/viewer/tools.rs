@@ -13,9 +13,6 @@ use lopdf::ObjectId;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-/// Line width of a drawing, in points.
-pub const INK_WIDTH: f64 = 2.0;
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Tool {
     Select,
@@ -51,13 +48,13 @@ impl Tool {
         match self {
             Tool::Select => "Select text and annotations (V)",
             Tool::Highlight => "Highlight text (H)",
-            Tool::Underline => "Underline text",
-            Tool::Strike => "Strike out text",
+            Tool::Underline => "Underline text (U)",
+            Tool::Strike => "Strike out text (X)",
             Tool::Ink => "Draw (D)",
             Tool::Note => "Add a note (N)",
             Tool::TextBox => "Add a text box (T)",
             Tool::EditText => "Edit text: drag over words to replace them (E)",
-            Tool::Sign => "Place a signature",
+            Tool::Sign => "Place a signature (S)",
         }
         .to_string()
     }
@@ -88,6 +85,8 @@ enum Drag {
     Ink,
     Band((f64, f64)),
     Move(AnnotSel, (f64, f64)),
+    /// Dragging the corner handle of an annotation whose box started as this.
+    Resize(AnnotSel, Rect),
     Nothing,
 }
 
@@ -108,6 +107,20 @@ pub fn annot_rect(v: &View, sel: AnnotSel) -> Option<Rect> {
     let lo = v.lo()?;
     let page = *annots::page_ids(&lo).get(sel.page)?;
     annots::read_page(&lo, page).into_iter().find(|a| a.id == sel.id).map(|a| a.rect)
+}
+
+/// True when the selected annotation has a resize handle.
+pub fn resizable(v: &View, sel: AnnotSel) -> bool {
+    info(v, sel).is_some_and(|a| a.kind.resizable())
+}
+
+/// True when (`x`, `y`) is on the resize handle of the selected annotation on this page.
+fn on_handle(pv: &PageView, v: &View, x: f64, y: f64) -> Option<(AnnotSel, Rect)> {
+    let sel = (*v.annot_sel.borrow()).filter(|s| s.page == pv.index)?;
+    let a = info(v, sel).filter(|a| a.kind.resizable())?;
+    let r = a.rect.inflate(2.0);
+    let reach = (pageview::HANDLE + 3.0) / v.zoom.get();
+    ((x - r.x1).abs() <= reach && (y - r.y1).abs() <= reach).then_some((sel, a.rect))
 }
 
 fn info(v: &View, sel: AnnotSel) -> Option<AnnotInfo> {
@@ -146,10 +159,18 @@ fn style_for(t: Tool) -> poppler::SelectionStyle {
 
 pub fn drag_begin(pv: &Rc<PageView>, x: f64, y: f64) {
     let Some(v) = view() else { return };
+    // Working on the page puts the floating panel (narrow windows) away.
+    v.panel_used();
     if doc::current().is_none() {
         return;
     }
+    if v.is_presenting() {
+        DRAG.with(|d| *d.borrow_mut() = Drag::Nothing);
+        return;
+    }
+    let handle = if v.tool() == Tool::Select { on_handle(pv, &v, x, y) } else { None };
     let drag = match v.tool() {
+        Tool::Select if handle.is_some() => handle.map_or(Drag::Nothing, |(sel, r)| Drag::Resize(sel, r)),
         Tool::Select => {
             let sel = *v.annot_sel.borrow();
             let hit = sel.filter(|s| s.page == pv.index).and_then(|s| info(&v, s)).filter(|a| a.kind.movable() && a.rect.inflate(3.0).contains(x, y));
@@ -205,14 +226,39 @@ pub fn drag_update(pv: &Rc<PageView>, x: f64, y: f64) {
                 pv.marks.queue_draw();
             }
         }
+        Drag::Resize(sel, r) => {
+            pv.st.borrow_mut().band = Some(resized(&v, sel, r, x, y));
+            pv.marks.queue_draw();
+        }
         Drag::Nothing => {}
     }
+}
+
+/// The box an annotation would have with its corner dragged to (`x`, `y`). Pictures
+/// keep their shape; everything has a sensible smallest size.
+fn resized(v: &View, sel: AnnotSel, r: Rect, x: f64, y: f64) -> Rect {
+    let picture = info(v, sel).is_some_and(|a| a.kind == Kind::Stamp);
+    let w = (x - r.x0).max(12.0);
+    let h = if picture { w * r.height() / r.width().max(1.0) } else { (y - r.y0).max(8.0) };
+    Rect::new(r.x0, r.y0, r.x0 + w, r.y0 + h)
 }
 
 pub fn drag_end(pv: &Rc<PageView>, x: f64, y: f64, click: bool) {
     let Some(v) = view() else { return };
     let drag = DRAG.with(|d| std::mem::replace(&mut *d.borrow_mut(), Drag::Nothing));
     let tool = v.tool();
+    // Presenting: a click moves on to the next page (links still work).
+    if v.is_presenting() {
+        if click {
+            let link = doc::current().and_then(|d| pv.links(&d).iter().find(|l| l.area.contains(x, y)).map(|l| l.target.clone()));
+            match link {
+                Some(Target::Page(p)) => v.jump(p),
+                Some(Target::Uri(u)) => open_uri(&u),
+                None => v.step(1),
+            }
+        }
+        return;
+    }
     match drag {
         Drag::Text(start) => {
             if click {
@@ -240,7 +286,8 @@ pub fn drag_end(pv: &Rc<PageView>, x: f64, y: f64, click: bool) {
                         return;
                     }
                     let colour = rgb(&v);
-                    commit(pv, move |lo, page| annots::add_markup(lo, page, kind, &rects, colour, &author()));
+                    let opacity = if kind == Kind::Highlight { prefs::get().highlight_opacity } else { 1.0 };
+                    commit(pv, move |lo, page| annots::add_markup(lo, page, kind, &rects, colour, opacity, &author()));
                 }
                 Tool::EditText => edit_text(pv, &v, &rects, &text),
                 _ => {}
@@ -251,24 +298,34 @@ pub fn drag_end(pv: &Rc<PageView>, x: f64, y: f64, click: bool) {
             pageview::clear_preview(pv);
             if stroke.len() > 1 {
                 let colour = rgb(&v);
-                commit(pv, move |lo, page| annots::add_ink(lo, page, &[stroke], colour, INK_WIDTH, &author()));
+                let width = prefs::get().ink_width;
+                commit(pv, move |lo, page| annots::add_ink(lo, page, &[stroke], colour, width, &author()));
             }
         }
         Drag::Band(start) => {
             pageview::clear_preview(pv);
             let (w, h) = pv.size.get();
-            let mut r = Rect::new(start.0, start.1, x, y);
-            if click || r.width() < 24.0 || r.height() < 14.0 {
-                r = Rect::new(start.0, start.1, start.0 + 180.0, start.1 + 48.0);
-            }
-            let r = Rect::new(r.x0.max(0.0), r.y0.max(0.0), r.x1.min(w), r.y1.min(h));
+            let size = prefs::get().text_size;
+            let r = Rect::new(start.0, start.1, x, y);
+            let drawn = !(click || r.width() < 24.0 || r.height() < 14.0);
             let colour = rgb(&v);
             let pv2 = pv.clone();
-            prompt_text(pv, &r, "Text box", "", "Add", move |text| {
+            let anchor = if drawn { r } else { Rect::new(start.0, start.1, start.0 + 1.0, start.1 + 1.0) };
+            prompt_text(pv, &anchor, "Text box", "", "Add", move |text| {
                 if text.trim().is_empty() {
                     return;
                 }
-                let id = commit(&pv2, |lo, page| annots::add_text_box(lo, page, r, &text, colour, 12.0, &author()));
+                // A click (rather than a drawn box) gets a box that fits the text.
+                let mut r = r;
+                if !drawn {
+                    let face = annots::Face::default();
+                    let longest = text.lines().map(|l| annots::text_width(face, size, l)).fold(0.0, f64::max);
+                    let bw = (longest + 8.0).clamp(40.0, (w - start.0).max(40.0)).min(320.0);
+                    let lines = annots::wrap(face, size, bw - 6.0, &text).len().max(1) as f64;
+                    r = Rect::new(start.0, start.1, start.0 + bw, start.1 + lines * size * 1.2 + 6.0);
+                }
+                let r = Rect::new(r.x0.max(0.0), r.y0.max(0.0), r.x1.min(w), r.y1.min(h));
+                let id = commit(&pv2, |lo, page| annots::add_text_box(lo, page, r, &text, colour, size, &author()));
                 select_new(&pv2, id);
             });
         }
@@ -285,6 +342,22 @@ pub fn drag_end(pv: &Rc<PageView>, x: f64, y: f64, click: bool) {
                 annots::move_by(lo, page, sel.id, dx, dy)
             });
             if moved {
+                *v.annot_sel.borrow_mut() = Some(sel);
+                pageview::queue_all(&v);
+            }
+        }
+        Drag::Resize(sel, r) => {
+            pageview::clear_preview(pv);
+            let new = resized(&v, sel, r, x, y);
+            if click || (new.width() - r.width()).abs() + (new.height() - r.height()).abs() < 1.0 {
+                return;
+            }
+            let idx = sel.page;
+            let done = doc::try_edit(false, move |lo| {
+                let page = *annots::page_ids(lo).get(idx).context("no such page")?;
+                annots::set_rect(lo, page, sel.id, new)
+            });
+            if done {
                 *v.annot_sel.borrow_mut() = Some(sel);
                 pageview::queue_all(&v);
             }
@@ -316,8 +389,18 @@ pub fn hover(pv: &Rc<PageView>, x: f64, y: f64) {
         return;
     }
     let Some(d) = doc::current() else { return };
+    if on_handle(pv, &v, x, y).is_some() {
+        pv.set_hover_cursor("se-resize");
+        return;
+    }
     let over_link = pv.links(&d).iter().any(|l| l.area.contains(x, y));
     pv.set_hover_cursor(if over_link { "pointer" } else { "default" });
+}
+
+fn open_uri(u: &str) {
+    if let Err(e) = gtk::gio::AppInfo::launch_default_for_uri(u, gtk::gio::AppLaunchContext::NONE) {
+        window::toast(&format!("Couldn't open that link: {e}"));
+    }
 }
 
 /// Run an edit that adds one annotation to this page; returns its id.
@@ -359,12 +442,8 @@ fn click_select(pv: &Rc<PageView>, v: &Rc<View>, x: f64, y: f64) {
     let links = pv.links(&d);
     if let Some(l) = links.iter().find(|l| l.area.contains(x, y)) {
         match &l.target {
-            Target::Page(p) => v.goto_page(*p),
-            Target::Uri(u) => {
-                if let Err(e) = gtk::gio::AppInfo::launch_default_for_uri(u, gtk::gio::AppLaunchContext::NONE) {
-                    window::toast(&format!("Couldn't open that link: {e}"));
-                }
-            }
+            Target::Page(p) => v.jump(*p),
+            Target::Uri(u) => open_uri(u),
         }
     }
 }
@@ -386,7 +465,7 @@ pub fn prompt_text(pv: &PageView, at: &Rect, title: &str, initial: &str, confirm
     card.append(&scroll);
     let buttons = widgets::hbox(8);
     buttons.set_halign(gtk::Align::End);
-    let cancel = gtk::Button::with_label("Not now");
+    let cancel = gtk::Button::with_label("Cancel");
     let ok = gtk::Button::with_label(confirm);
     ok.add_css_class("suggested-action");
     buttons.append(&cancel);

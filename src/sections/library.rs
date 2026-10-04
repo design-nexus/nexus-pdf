@@ -3,9 +3,9 @@
 use crate::widgets::{self, Page};
 use crate::{doc, fmt, paths, recent};
 use gtk::prelude::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 
 const COVER_W: i32 = 190;
 
@@ -13,6 +13,10 @@ thread_local! {
     static GRID: RefCell<Option<gtk::FlowBox>> = const { RefCell::new(None) };
     static QUERY: RefCell<String> = const { RefCell::new(String::new()) };
     static PAGE: RefCell<Option<gtk::Stack>> = const { RefCell::new(None) };
+    /// Each card's "Page N of M" line and progress bar, to update in place.
+    static CARDS: RefCell<HashMap<PathBuf, (gtk::Label, Option<gtk::ProgressBar>)>> = RefCell::new(HashMap::new());
+    /// The list changed while the library wasn't showing; rebuild when it is.
+    static STALE: Cell<bool> = const { Cell::new(false) };
 }
 
 pub fn set_query(q: &str) {
@@ -42,6 +46,15 @@ pub fn build(page: &Page) {
     merge.connect_clicked(|_| crate::sections::pages::merge_dialog());
     top.append(&open);
     top.append(&merge);
+    let spacer = widgets::hbox(0);
+    spacer.set_hexpand(true);
+    top.append(&spacer);
+    let sort = widgets::segmented(&widgets::opts(&[("recent", "Recent"), ("name", "Name")]), &crate::prefs::get().library_sort, |id| {
+        crate::prefs::update(|p| p.library_sort = id);
+        refresh();
+    });
+    sort.set_tooltip_text(Some("Order the files by when you opened them, or by name"));
+    top.append(&sort);
     page.body.append(&top);
 
     let stack = gtk::Stack::new();
@@ -69,19 +82,51 @@ pub fn build(page: &Page) {
     );
     stack.add_named(&widgets::empty_state("system-search-symbolic", "No matching files", "Nothing in your recent files matches that search.", None), Some("none"));
     page.body.append(&stack);
+    flow.connect_map(|_| {
+        if STALE.with(|s| s.replace(false)) {
+            refresh();
+        }
+    });
     GRID.with(|g| *g.borrow_mut() = Some(flow));
     PAGE.with(|p| *p.borrow_mut() = Some(stack));
     refresh();
-    // The list changes when files open, close or save under a new name.
-    doc::subscribe(&page.root, |c| {
-        if matches!(c, doc::Change::Opened | doc::Change::Closed | doc::Change::Dirty | doc::Change::Page) {
-            glib_idle_refresh();
+    // Opening a file moves it to the front; saving under a new name adds one. Turning
+    // pages only changes that file's card.
+    doc::subscribe(&page.root, |c| match c {
+        doc::Change::Opened => queue_refresh(),
+        doc::Change::Dirty => {
+            let known = doc::current().is_some_and(|d| CARDS.with(|m| m.borrow().contains_key(&d.path())));
+            if !known {
+                queue_refresh();
+            }
         }
+        doc::Change::Page => update_progress(),
+        _ => {}
     });
 }
 
-fn glib_idle_refresh() {
-    gtk::glib::idle_add_local_once(refresh);
+/// Rebuild the grid now if it's showing, otherwise the next time it is.
+fn queue_refresh() {
+    let showing = GRID.with(|g| g.borrow().as_ref().is_some_and(|f| f.is_mapped()));
+    if showing {
+        gtk::glib::idle_add_local_once(refresh);
+    } else {
+        STALE.with(|s| s.set(true));
+    }
+}
+
+/// The current file's card shows the page it's on now.
+fn update_progress() {
+    let Some(d) = doc::current() else { return };
+    CARDS.with(|m| {
+        if let Some((meta, bar)) = m.borrow().get(&d.path()) {
+            let n = d.n_pages();
+            meta.set_text(&format!("Page {} of {n}", d.page() + 1));
+            if let Some(bar) = bar {
+                bar.set_fraction((d.page() + 1) as f64 / n.max(1) as f64);
+            }
+        }
+    });
 }
 
 fn cover_file(path: &Path, mtime: u64) -> PathBuf {
@@ -99,13 +144,18 @@ fn refresh() {
     while let Some(c) = flow.first_child() {
         flow.remove(&c);
     }
+    CARDS.with(|m| m.borrow_mut().clear());
     let all = recent::list();
     let q = QUERY.with(|q| q.borrow().clone());
-    let shown: Vec<_> = all
+    let mut shown: Vec<_> = all
         .iter()
-        .filter(|r| q.is_empty() || r.path.to_string_lossy().to_lowercase().contains(&q))
+        .filter(|r| q.is_empty() || r.path.to_string_lossy().to_lowercase().contains(&q) || r.title.to_lowercase().contains(&q))
         .cloned()
         .collect();
+    if crate::prefs::get().library_sort == "name" {
+        let name = |r: &recent::Recent| r.path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+        shown.sort_by_key(name);
+    }
     stack.set_visible_child_name(if all.is_empty() { "empty" } else if shown.is_empty() { "none" } else { "grid" });
     for r in shown {
         let child = gtk::FlowBoxChild::new();
@@ -124,7 +174,8 @@ fn card(r: recent::Recent) -> gtk::Button {
     let cover = gtk::Picture::new();
     cover.add_css_class("cover");
     cover.set_can_shrink(true);
-    cover.set_content_fit(gtk::ContentFit::Cover);
+    // Whole page, landscape ones too.
+    cover.set_content_fit(gtk::ContentFit::Contain);
     cover.set_size_request(COVER_W, (f64::from(COVER_W) * 1.3) as i32);
     body.append(&cover);
     let info = widgets::vbox(2);
@@ -147,18 +198,30 @@ fn card(r: recent::Recent) -> gtk::Button {
     } else {
         fmt::count(r.pages, "page", "pages")
     };
-    info.append(&widgets::label(&meta, "card-meta"));
+    let meta_label = widgets::label(&meta, "card-meta");
+    info.append(&meta_label);
+    let mut progress = None;
     if exists && r.pages > 1 {
         let bar = gtk::ProgressBar::new();
         bar.add_css_class("card-progress");
         bar.set_fraction(((r.page + 1) as f64 / r.pages as f64).min(1.0));
         bar.set_margin_top(4);
         info.append(&bar);
+        progress = Some(bar);
+    }
+    if exists {
+        CARDS.with(|m| m.borrow_mut().insert(r.path.clone(), (meta_label, progress)));
     }
     body.append(&info);
     button.set_child(Some(&body));
-    button.set_tooltip_text(Some(&paths::pretty(&r.path)));
+    let tip = paths::pretty(&r.path);
+    button.set_tooltip_text(Some(&if r.title.is_empty() || Some(r.title.as_str()) == r.path.file_stem().and_then(|s| s.to_str()) {
+        tip
+    } else {
+        format!("{}\n{tip}", r.title)
+    }));
     if exists {
+        cover.add_css_class("loading");
         load_cover(&cover, &r.path);
     } else {
         cover.add_css_class("dim");
@@ -185,6 +248,17 @@ fn card(r: recent::Recent) -> gtk::Button {
         }
     });
     let holder = widgets::vbox(4);
+    if exists {
+        let show = gtk::Button::with_label("Show in folder");
+        show.add_css_class("flat");
+        show.add_css_class("menu-item");
+        let (path, menu) = (r.path.clone(), menu.clone());
+        show.connect_clicked(move |_| {
+            menu.popdown();
+            crate::cmd::show_in_folder(&path);
+        });
+        holder.append(&show);
+    }
     holder.append(&forget);
     holder.append(&widgets::label("The file itself isn't touched.", "dim"));
     menu.set_child(Some(&holder));
@@ -203,6 +277,7 @@ fn load_cover(picture: &gtk::Picture, path: &Path) {
     let file = cover_file(path, mtime(path));
     if file.is_file() {
         picture.set_filename(Some(&file));
+        picture.remove_css_class("loading");
         return;
     }
     let (path, pic, out) = (path.to_path_buf(), picture.clone(), file);
@@ -232,10 +307,12 @@ fn load_cover(picture: &gtk::Picture, path: &Path) {
             Some(out)
         },
         move |res| {
-            if let (Some(file), Some(p)) = (res, weak.upgrade()) {
-                p.set_filename(Some(&file));
+            if let Some(p) = weak.upgrade() {
+                p.remove_css_class("loading");
+                if let Some(file) = res {
+                    p.set_filename(Some(&file));
+                }
             }
         },
     );
-    let _ = Rc::new(());
 }

@@ -58,7 +58,7 @@ pub fn choose(done: impl Fn(Option<PathBuf>) + 'static) {
     let buttons = widgets::hbox(8);
     buttons.set_halign(gtk::Align::End);
     buttons.set_margin_top(6);
-    let cancel = gtk::Button::with_label("Not now");
+    let cancel = gtk::Button::with_label("Cancel");
     let pick = gtk::Button::with_label("Use a picture…");
     let draw = gtk::Button::with_label("Draw new");
     draw.add_css_class("suggested-action");
@@ -197,7 +197,7 @@ fn draw_dialog(done: Rc<dyn Fn(Option<PathBuf>)>) {
     let buttons = widgets::hbox(8);
     buttons.set_halign(gtk::Align::End);
     buttons.set_margin_top(6);
-    let cancel = gtk::Button::with_label("Not now");
+    let cancel = gtk::Button::with_label("Cancel");
     let clear = gtk::Button::with_label("Clear");
     let save = gtk::Button::with_label("Use this signature");
     save.add_css_class("suggested-action");

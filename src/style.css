@@ -669,37 +669,127 @@ window.pdf-window popover separator {
 
 /* ---------- The viewer ---------- */
 
-.viewer-header {
-  padding: 20px 28px 14px;
+/* One tab per open file, above the tool strip. The current tab joins the strip. */
+.tab-bar {
+  padding: 8px 14px 0;
+  background: @theme_bg;
 }
 
-.settings-page.narrow .viewer-header {
-  padding: 14px 16px 10px;
+.settings-page.narrow .tab-bar {
+  padding: 6px 8px 0;
 }
 
-.viewer-title {
-  font-size: 1.15em;
-  font-weight: 700;
+.tab-bar .tabs {
+  padding: 0 2px;
+}
+
+.doc-tab {
+  border-radius: 8px 8px 0 0;
+  border: 1px solid transparent;
+  border-bottom: none;
+  padding: 0 2px 0 0;
+  margin-bottom: -1px;
+  transition: background 150ms ease-out;
+}
+
+.doc-tab:hover {
+  background: alpha(@theme_highlight, 0.45);
+}
+
+.doc-tab.active {
+  background: @theme_surface;
+  border-color: alpha(@theme_border, 0.55);
+}
+
+window.pdf-window .doc-tab button.tab-main {
+  min-height: 34px;
+  padding: 0 6px 0 12px;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  color: @theme_dim_text;
+  font-weight: 600;
+}
+
+window.pdf-window .doc-tab.active button.tab-main {
   color: @theme_text;
 }
 
-.viewer-subtitle {
-  margin-top: 1px;
-  font-size: 0.8em;
+.doc-tab .tab-icon {
   color: @theme_dim_text;
 }
 
-window.pdf-window .viewer-header button {
-  min-height: 32px;
+.doc-tab.active .tab-icon {
+  color: @theme_accent;
+}
+
+.doc-tab .tab-dirty {
+  color: @theme_accent;
+  font-weight: 800;
+}
+
+window.pdf-window .doc-tab button.tab-close {
+  min-width: 22px;
+  min-height: 22px;
+  padding: 0;
+  border-radius: 6px;
+  background: transparent;
+  border-color: transparent;
+  opacity: 0.55;
+}
+
+window.pdf-window .doc-tab button.tab-close:hover {
+  background: alpha(@theme_highlight, 0.8);
+  opacity: 1;
+}
+
+window.pdf-window .doc-tab button.tab-close image {
+  -gtk-icon-size: 12px;
+}
+
+window.pdf-window button.save-button {
+  min-height: 30px;
   padding: 0 12px;
   font-weight: 600;
 }
 
-window.pdf-window .viewer-header button.flat image {
+window.pdf-window menubutton.tb-menu > button {
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0;
+  border-radius: 7px;
+  background: transparent;
+  border: 1px solid transparent;
+  box-shadow: none;
+}
+
+window.pdf-window menubutton.tb-menu > button image {
   color: @theme_dim_text;
 }
 
-/* One bar for tools, view and history. */
+window.pdf-window menubutton.tb-menu > button:hover {
+  background: alpha(@theme_highlight, 0.7);
+}
+
+window.pdf-window menubutton.tb-menu > button:hover image,
+window.pdf-window menubutton.tb-menu > button:checked image {
+  color: @theme_text;
+}
+
+.menu-box {
+  padding: 6px;
+  min-width: 220px;
+}
+
+window.pdf-window popover.tool-popover > contents {
+  padding: 12px;
+}
+
+.tool-options scale {
+  min-width: 220px;
+}
+
+/* One bar for tools, view, history and saving. */
 .tool-strip {
   min-height: 44px;
   padding: 6px 20px;
@@ -776,7 +866,11 @@ window.pdf-window entry.page-entry {
 }
 
 .viewer-banner {
-  margin: 10px 28px 0;
+  margin: 10px 20px;
+}
+
+.viewer-banner button {
+  min-height: 28px;
 }
 
 .canvas {
@@ -789,12 +883,60 @@ window.pdf-window entry.page-entry {
   box-shadow: 0 1px 3px alpha(@theme_shadow, 0.7), 0 10px 28px alpha(@theme_shadow, 0.45);
 }
 
+/* Recoloured pages are close to the background: give them an edge. */
+.pages-themed .page-card {
+  box-shadow: 0 0 0 1px alpha(@theme_border, 0.95), 0 1px 3px alpha(@theme_shadow, 0.7), 0 10px 28px alpha(@theme_shadow, 0.45);
+}
+
+.pages-themed .thumb-picture,
+.pages-themed .page-tile picture {
+  box-shadow: 0 0 0 1px alpha(@theme_border, 0.9), 0 2px 8px alpha(@theme_shadow, 0.45);
+}
+
+/* Presenting: nothing but the page on black. */
+.presenting .canvas {
+  background: #000000;
+}
+
+.presenting .page-card {
+  box-shadow: none;
+  border-radius: 0;
+}
+
+/* A page or picture still being drawn breathes gently. */
+@keyframes loading-pulse {
+  from { opacity: 1; }
+  to { opacity: 0.55; }
+}
+
+.page-card.loading,
+picture.loading {
+  animation: loading-pulse 900ms ease-in-out infinite alternate;
+}
+
 /* ---------- Side panel ---------- */
 
 .side-panel {
   background: @theme_surface;
-  border-right: 1px solid alpha(@theme_border, 0.55);
   padding: 12px 10px 6px;
+}
+
+/* On a narrow window the panel floats over the pages. */
+.side-panel.floating {
+  border-right: 1px solid alpha(@theme_border, 0.8);
+  box-shadow: 6px 0 24px alpha(@theme_shadow, 0.55);
+}
+
+/* The panel's edge, dragged to resize it. */
+.panel-handle {
+  min-width: 5px;
+  background: @theme_surface;
+  border-right: 1px solid alpha(@theme_border, 0.55);
+  transition: background 150ms ease-out;
+}
+
+.panel-handle:hover {
+  background: alpha(@theme_accent, 0.35);
 }
 
 .side-panel .panel-tabs {
@@ -893,6 +1035,23 @@ window.pdf-window button.outline-toggle {
   padding: 6px 18px 8px;
 }
 
+window.pdf-window button.search-option {
+  min-height: 28px;
+  min-width: 34px;
+  padding: 0 8px;
+  font-size: 0.86em;
+  font-weight: 700;
+  background: transparent;
+  border-color: alpha(@theme_border, 0.6);
+  color: @theme_dim_text;
+}
+
+window.pdf-window button.search-option:checked {
+  background: alpha(@theme_accent, 0.18);
+  border-color: alpha(@theme_accent, 0.6);
+  color: @theme_accent;
+}
+
 /* ---------- Colour choices ---------- */
 
 box.dot {
@@ -955,6 +1114,23 @@ window.pdf-window entry.form-field:focus-within {
 
 window.pdf-window .pages-themed entry.form-field,
 window.pdf-window .pages-themed entry.form-field:focus-within {
+  background: mix(@theme_bg, @theme_accent, 0.18);
+  color: @theme_text;
+}
+
+window.pdf-window scrolledwindow.form-field {
+  border-radius: 2px;
+  border: 1px solid alpha(@theme_accent, 0.55);
+}
+
+window.pdf-window textview.form-text,
+window.pdf-window textview.form-text > text {
+  background: mix(#ffffff, @theme_accent, 0.14);
+  color: #101010;
+}
+
+window.pdf-window .pages-themed textview.form-text,
+window.pdf-window .pages-themed textview.form-text > text {
   background: mix(@theme_bg, @theme_accent, 0.18);
   color: @theme_text;
 }
@@ -1104,6 +1280,12 @@ window.pdf-window button.page-tile.drop-before {
 
 .pages-toolbar {
   margin: 4px 0 12px;
+}
+
+.pages-toolbar flowboxchild {
+  padding: 0 6px 0 0;
+  background: transparent;
+  outline: none;
 }
 
 .pages-grid flowboxchild {

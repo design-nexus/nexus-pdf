@@ -7,6 +7,9 @@
 //! `note PAGE X Y TEXT` · `textbox PAGE X0 Y0 X1 Y1 TEXT` · `edit PAGE X0 Y0 X1 Y1 TEXT`
 //! `sign PICTURE PAGE X Y` · `search TEXT` · `undo` · `redo` · `save PATH`
 //! `panel` (toggle) · `tab thumbs|outline|markup` · `colours off|invert|tint` · `theme ID` · `wait MS`
+//! `open PATH` (in a new tab) · `layout single|pairs|book` · `scroll continuous|single` · `present`
+//! `back` · `forward` · `jump N` · `resize PAGE X Y` (drag the selected annotation's corner there)
+//! `status` and `windows` print what's open, for checking from a terminal · `recover` (offer crash recovery) · `clearform` · `printpdf PATH` (print to a file)
 
 use super::{Tool, tools, view};
 use crate::doc::annots;
@@ -163,7 +166,7 @@ fn run(step: &str) -> Option<u64> {
         "search" => {
             if let Some(v) = &v {
                 v.search.open();
-                v.search.run(rest.trim());
+                v.search.type_query(rest.trim());
             }
         }
         "panel" => super::toggle_panel(),
@@ -191,6 +194,63 @@ fn run(step: &str) -> Option<u64> {
             {
                 eprintln!("script: save failed: {e:#}");
             }
+        }
+        "open" => doc::request_open(std::path::PathBuf::from(rest.trim()), None),
+        "layout" => {
+            crate::prefs::update(|p| p.spread = rest.trim().to_string());
+            super::rebuild();
+        }
+        "scroll" => {
+            crate::prefs::update(|p| p.continuous = rest.trim() == "continuous");
+            super::relayout();
+        }
+        "present" => super::toggle_presenting(),
+        "back" => super::go_back(),
+        "forward" => super::go_forward(),
+        "jump" => {
+            if let Some(n) = nums(&parts).first() {
+                super::jump(*n as usize - 1);
+            }
+        }
+        "resize" => {
+            let n = nums(&parts);
+            if let (Some(v), [p, x, y]) = (&v, n.as_slice()) {
+                let pv = v.pages.borrow().get(*p as usize - 1).cloned();
+                let corner = (*v.annot_sel.borrow()).and_then(|s| tools::annot_rect(v, s));
+                if let (Some(pv), Some(r)) = (pv, corner) {
+                    tools::drag_begin(&pv, r.x1 + 2.0, r.y1 + 2.0);
+                    tools::drag_update(&pv, *x, *y);
+                    tools::drag_end(&pv, *x, *y, false);
+                }
+            }
+        }
+        "status" => {
+            if let (Some(v), Some(d)) = (&v, doc::current()) {
+                println!(
+                    "status: page {} of {}, back {}, forward {}, dirty {}, zoom {:.2}, files {}, back button {}",
+                    d.page() + 1,
+                    d.n_pages(),
+                    d.can_go_back(),
+                    d.can_go_forward(),
+                    d.dirty(),
+                    v.zoom.get(),
+                    doc::all().len(),
+                    v.back_btn.is_sensitive()
+                );
+                println!("search: {}", v.search.describe());
+            }
+        }
+        "recover" => doc::offer_recovery(),
+        "clearform" => super::clear_form(),
+        "printpdf" => doc::print_to(Some(std::path::Path::new(rest.trim()))),
+        "windows" => {
+            let titles: Vec<String> = gtk::Window::list_toplevels()
+                .into_iter()
+                .filter_map(|w| w.downcast::<gtk::Window>().ok())
+                .filter(|w| w.is_visible())
+                .map(|w| w.title().map(|t| t.to_string()).unwrap_or_default())
+                .collect();
+            println!("windows: {titles:?}");
         }
         "wait" => return rest.trim().parse().ok(),
         other => eprintln!("script: unknown step {other:?}"),

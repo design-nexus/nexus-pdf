@@ -10,6 +10,8 @@ pub struct Recent {
     pub pages: usize,
     /// Zero-based page last viewed.
     pub page: usize,
+    /// The document's own title, when it has one.
+    pub title: String,
 }
 
 fn open() -> rusqlite::Result<Connection> {
@@ -26,6 +28,11 @@ fn open() -> rusqlite::Result<Connection> {
             opened INTEGER NOT NULL DEFAULT 0
         );",
     )?;
+    // Added after the first release.
+    let has_title = c.prepare("SELECT title FROM recent LIMIT 0").is_ok();
+    if !has_title {
+        c.execute_batch("ALTER TABLE recent ADD COLUMN title TEXT NOT NULL DEFAULT '';")?;
+    }
     Ok(c)
 }
 
@@ -45,6 +52,12 @@ pub fn record(path: &Path, pages: usize, page: usize) {
              ON CONFLICT(path) DO UPDATE SET pages = ?2, page = ?3, opened = ?4",
             params![key(path), pages as i64, page as i64, now()],
         );
+    }
+}
+
+pub fn set_title(path: &Path, title: &str) {
+    if let Ok(c) = open() {
+        let _ = c.execute("UPDATE recent SET title = ?2 WHERE path = ?1", params![key(path), title]);
     }
 }
 
@@ -70,7 +83,7 @@ pub fn forget(path: &Path) {
 /// Newest first.
 pub fn list() -> Vec<Recent> {
     let Ok(c) = open() else { return Vec::new() };
-    let Ok(mut stmt) = c.prepare("SELECT path, pages, page FROM recent ORDER BY opened DESC LIMIT 200") else {
+    let Ok(mut stmt) = c.prepare("SELECT path, pages, page, title FROM recent ORDER BY opened DESC LIMIT 200") else {
         return Vec::new();
     };
     stmt.query_map([], |r| {
@@ -78,6 +91,7 @@ pub fn list() -> Vec<Recent> {
             path: PathBuf::from(r.get::<_, String>(0)?),
             pages: r.get::<_, i64>(1)?.max(0) as usize,
             page: r.get::<_, i64>(2)?.max(0) as usize,
+            title: r.get::<_, String>(3)?,
         })
     })
     .map(|rows| rows.flatten().collect())

@@ -19,10 +19,12 @@ struct State {
     grid: gtk::FlowBox,
     count: gtk::Label,
     tiles: RefCell<Vec<gtk::Button>>,
+    save: gtk::Button,
+    undo: gtk::Button,
     selected: RefCell<Vec<usize>>,
     /// The last tile clicked, for shift-click ranges.
     anchor: Cell<Option<usize>>,
-    toolbar: gtk::Box,
+    toolbar: gtk::FlowBox,
 }
 
 thread_local! {
@@ -47,9 +49,14 @@ pub fn build(page: &Page) {
     );
 
     let root = widgets::vbox(0);
-    let toolbar = widgets::hbox(8);
+    // The buttons wrap onto more rows when the window is narrow.
+    let toolbar = gtk::FlowBox::new();
     toolbar.add_css_class("pages-toolbar");
-    toolbar.set_halign(gtk::Align::Start);
+    toolbar.set_selection_mode(gtk::SelectionMode::None);
+    toolbar.set_column_spacing(8);
+    toolbar.set_row_spacing(8);
+    toolbar.set_max_children_per_line(4);
+    toolbar.set_homogeneous(false);
     root.append(&toolbar);
     let grid = gtk::FlowBox::new();
     grid.add_css_class("pages-grid");
@@ -70,10 +77,22 @@ pub fn build(page: &Page) {
 
     let count = widgets::label("", "dim");
     count.set_valign(gtk::Align::Center);
+    let save = widgets::labeled_button("document-save-symbolic", "Save");
+    save.set_tooltip_text(Some("Save (Ctrl+S)"));
+    save.connect_clicked(|_| doc::save());
+    let undo = gtk::Button::from_icon_name("edit-undo-symbolic");
+    undo.set_tooltip_text(Some("Undo (Ctrl+Z)"));
+    undo.connect_clicked(|_| doc::undo());
+    // Dropping PDFs on the empty part of the grid adds their pages at the end.
+    let drop = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
+    drop.connect_drop(|_, value, _, _| insert_dropped(value, None));
+    grid.add_controller(drop);
     let st = Rc::new(State {
         stack,
         grid,
         count,
+        save,
+        undo,
         tiles: RefCell::new(Vec::new()),
         selected: RefCell::new(Vec::new()),
         anchor: Cell::new(None),
@@ -86,7 +105,51 @@ pub fn build(page: &Page) {
         if matches!(c, Change::Opened | Change::Closed | Change::Structure) {
             rebuild();
         }
+        if matches!(c, Change::Opened | Change::Closed | Change::Dirty) {
+            refresh_saved();
+        }
     });
+    refresh_saved();
+}
+
+/// Save is offered (and stands out) when there are unsaved changes.
+fn refresh_saved() {
+    let Some(st) = state() else { return };
+    let d = doc::current();
+    let dirty = d.as_ref().is_some_and(|d| d.dirty());
+    st.save.set_sensitive(dirty);
+    if dirty {
+        st.save.add_css_class("suggested-action");
+    } else {
+        st.save.remove_css_class("suggested-action");
+    }
+    st.undo.set_sensitive(d.as_ref().is_some_and(|d| d.can_undo()));
+}
+
+/// Add the pages of PDFs dropped from a file manager before page `at` (or at the end).
+fn insert_dropped(value: &gtk::glib::Value, at: Option<usize>) -> bool {
+    let Ok(list) = value.get::<gdk::FileList>() else { return false };
+    let Some(d) = doc::current() else { return false };
+    let paths: Vec<PathBuf> = list.files().iter().filter_map(|f| f.path()).filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"))).collect();
+    if paths.is_empty() {
+        window::toast("Only PDF files can be added.");
+        return false;
+    }
+    let mut at = at.unwrap_or(d.n_pages());
+    let mut added = 0;
+    let ok = doc::try_edit(true, |lo| {
+        for path in &paths {
+            let mut other = lopdf::Document::load(path).with_context(|| format!("couldn't read {}", paths::pretty(path)))?;
+            let n = ops::insert_from(lo, &mut other, at)?;
+            at += n;
+            added += n;
+        }
+        Ok(())
+    });
+    if ok {
+        window::toast(&format!("Added {}.", fmt::count(added, "page", "pages")));
+    }
+    ok
 }
 
 fn chip(icon: &str, text: &str, tip: &str) -> gtk::Button {
@@ -103,7 +166,7 @@ fn build_toolbar(st: &Rc<State>) {
             refresh_selection(&st);
         }
     });
-    let none = gtk::Button::with_label("Clear");
+    let none = gtk::Button::with_label("Select none");
     none.connect_clicked(|_| {
         if let Some(st) = state() {
             st.selected.borrow_mut().clear();
@@ -124,18 +187,20 @@ fn build_toolbar(st: &Rc<State>) {
     insert.connect_clicked(|_| insert_dialog());
     let extract = chip("document-save-as-symbolic", "Save as new file", "Save the selected pages (or all of them) as a new PDF");
     extract.connect_clicked(|_| extract_dialog());
-    for w in [&all, &none] {
-        st.toolbar.append(w);
-    }
-    st.toolbar.append(&gtk::Separator::new(gtk::Orientation::Vertical));
-    for w in [&left, &right, &earlier, &later] {
-        st.toolbar.append(w);
-    }
-    st.toolbar.append(&delete);
-    st.toolbar.append(&gtk::Separator::new(gtk::Orientation::Vertical));
-    st.toolbar.append(&insert);
-    st.toolbar.append(&extract);
-    st.toolbar.append(&st.count);
+    let group = |items: &[&gtk::Widget]| {
+        let g = widgets::hbox(6);
+        for w in items {
+            g.append(*w);
+        }
+        let child = gtk::FlowBoxChild::new();
+        child.set_focusable(false);
+        child.set_child(Some(&g));
+        st.toolbar.append(&child);
+    };
+    group(&[all.upcast_ref(), none.upcast_ref(), st.count.upcast_ref()]);
+    group(&[left.upcast_ref(), right.upcast_ref(), earlier.upcast_ref(), later.upcast_ref(), delete.upcast_ref()]);
+    group(&[insert.upcast_ref(), extract.upcast_ref()]);
+    group(&[st.undo.upcast_ref(), st.save.upcast_ref()]);
 }
 
 fn rebuild() {
@@ -158,6 +223,7 @@ fn rebuild() {
         button.add_css_class("page-tile");
         let card = widgets::vbox(4);
         let picture = gtk::Picture::new();
+        picture.add_css_class("loading");
         picture.set_can_shrink(true);
         picture.set_content_fit(gtk::ContentFit::Fill);
         picture.set_size_request(TILE_W, (f64::from(TILE_W) * h / w.max(1.0)).round() as i32);
@@ -168,7 +234,10 @@ fn rebuild() {
         card.append(&num);
         button.set_child(Some(&card));
         let pic = picture.clone();
-        let ticket = thumbs::get(i, (TILE_W * scale) as u32, move |t| pic.set_paintable(Some(&t)));
+        let ticket = thumbs::get(i, (TILE_W * scale) as u32, move |t| {
+            pic.set_paintable(Some(&t));
+            pic.remove_css_class("loading");
+        });
         std::mem::forget(ticket);
         wire_tile(&button, i);
         let child = gtk::FlowBoxChild::new();
@@ -252,6 +321,21 @@ fn wire_tile(button: &gtk::Button, i: usize) {
         move_before(&moving, i)
     });
     button.add_controller(target);
+    // PDFs dropped from a file manager go in before this page.
+    let files = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
+    let b = button.clone();
+    files.connect_enter(move |_, _, _| {
+        b.add_css_class("drop-before");
+        gdk::DragAction::COPY
+    });
+    let b = button.clone();
+    files.connect_leave(move |_| b.remove_css_class("drop-before"));
+    let b = button.clone();
+    files.connect_drop(move |_, value, _, _| {
+        b.remove_css_class("drop-before");
+        insert_dropped(value, Some(i))
+    });
+    button.add_controller(files);
 }
 
 /// Move `moving` so they sit just before page `before`. True if anything moved.
@@ -484,7 +568,7 @@ pub fn merge_dialog() {
     let buttons = widgets::hbox(8);
     buttons.set_halign(gtk::Align::End);
     buttons.set_margin_top(6);
-    let cancel = gtk::Button::with_label("Not now");
+    let cancel = gtk::Button::with_label("Cancel");
     let add = gtk::Button::with_label("Add files…");
     buttons.append(&cancel);
     buttons.append(&add);

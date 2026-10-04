@@ -1,11 +1,13 @@
 //! Searching the open document: a bar above the pages, hits drawn on them.
 
-use super::{PAD_Y, view};
+use super::view;
 use crate::doc::geom::Rect;
-use crate::doc::{self, Change};
+use crate::doc::{self, Change, annots};
 use crate::widgets;
 use gtk::prelude::*;
 use std::cell::{Cell, RefCell};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Clone, Copy, Debug)]
 struct Hit {
@@ -17,9 +19,24 @@ pub struct Search {
     pub bar: gtk::Revealer,
     entry: gtk::SearchEntry,
     readout: gtk::Label,
+    case: gtk::ToggleButton,
+    words: gtk::ToggleButton,
     hits: RefCell<Vec<Hit>>,
     cur: Cell<Option<usize>>,
     token: Cell<u32>,
+    /// Stops the search running in the background.
+    cancel: RefCell<Arc<AtomicBool>>,
+    /// Still looking (the readout says how far it's got).
+    busy: Cell<bool>,
+    /// The page being read when the search started: the first match on or after it comes first.
+    start: Cell<usize>,
+}
+
+/// What the background search sends back.
+enum Found {
+    /// The matches on one page.
+    Page(usize, Vec<Hit>),
+    Done,
 }
 
 impl Search {
@@ -34,6 +51,19 @@ impl Search {
         entry.set_hexpand(true);
         let readout = widgets::label("", "mono");
         readout.add_css_class("dim");
+        let case = gtk::ToggleButton::with_label("Aa");
+        case.set_tooltip_text(Some("Match case"));
+        let words = gtk::ToggleButton::with_label("Word");
+        words.set_tooltip_text(Some("Whole words only"));
+        for b in [&case, &words] {
+            b.add_css_class("search-option");
+            b.set_valign(gtk::Align::Center);
+            b.connect_toggled(|_| {
+                if let Some(v) = view() {
+                    v.search.rerun();
+                }
+            });
+        }
         let prev = gtk::Button::from_icon_name("go-up-symbolic");
         prev.set_tooltip_text(Some("Previous match (Shift+Enter)"));
         let next = gtk::Button::from_icon_name("go-down-symbolic");
@@ -45,6 +75,8 @@ impl Search {
             b.add_css_class("flat");
         }
         row.append(&entry);
+        row.append(&case);
+        row.append(&words);
         row.append(&readout);
         row.append(&prev);
         row.append(&next);
@@ -81,7 +113,29 @@ impl Search {
         });
         entry.add_controller(keys);
 
-        Search { bar, entry, readout, hits: RefCell::new(Vec::new()), cur: Cell::new(None), token: Cell::new(0) }
+        Search {
+            bar,
+            entry,
+            readout,
+            case,
+            words,
+            hits: RefCell::new(Vec::new()),
+            cur: Cell::new(None),
+            token: Cell::new(0),
+            cancel: RefCell::new(Arc::new(AtomicBool::new(false))),
+            busy: Cell::new(false),
+            start: Cell::new(0),
+        }
+    }
+
+    /// What the readout says and how many matches there are (for the developer script).
+    pub fn describe(&self) -> String {
+        format!("{:?}, {} hits, busy {}", self.readout.text(), self.hits.borrow().len(), self.busy.get())
+    }
+
+    /// Type a query into the box, as the user would (the developer script).
+    pub fn type_query(&self, q: &str) {
+        self.entry.set_text(q);
     }
 
     pub fn is_open(&self) -> bool {
@@ -111,6 +165,8 @@ impl Search {
 
     fn clear(&self) {
         self.token.set(self.token.get() + 1);
+        self.cancel.borrow().store(true, Ordering::Relaxed);
+        self.busy.set(false);
         self.hits.borrow_mut().clear();
         self.cur.set(None);
         self.readout.set_text("");
@@ -128,31 +184,88 @@ impl Search {
         let q = query.trim().to_string();
         let token = self.token.get() + 1;
         self.token.set(token);
+        self.cancel.borrow().store(true, Ordering::Relaxed);
+        self.hits.borrow_mut().clear();
+        self.cur.set(None);
+        self.busy.set(false);
         let Some(d) = doc::current() else { return };
         if q.is_empty() {
-            self.hits.borrow_mut().clear();
-            self.cur.set(None);
             self.readout.set_text("");
             self.paint();
             return;
         }
-        let (path, pw, start) = (d.gen_path(), d.password(), d.page());
-        doc::background(
-            move || find_all(&path, pw.as_deref(), &q),
-            move |hits| {
+        let mut flags = poppler::FindFlags::DEFAULT;
+        if self.case.is_active() {
+            flags |= poppler::FindFlags::CASE_SENSITIVE;
+        }
+        if self.words.is_active() {
+            flags |= poppler::FindFlags::WHOLE_WORDS_ONLY;
+        }
+        // Notes and text boxes are searched too: their text isn't on the page itself.
+        let notes = annotation_hits(&q, self.case.is_active());
+        let cancel = Arc::new(AtomicBool::new(false));
+        *self.cancel.borrow_mut() = cancel.clone();
+        self.busy.set(true);
+        self.start.set(d.page());
+        self.paint();
+        self.show_progress(0, d.n_pages());
+        let (path, pw, n) = (d.gen_path(), d.password(), d.n_pages());
+        let (tx, rx) = async_channel::unbounded::<Found>();
+        std::thread::spawn(move || find_all(&path, pw.as_deref(), &q, flags, notes, &cancel, &tx));
+        gtk::glib::spawn_future_local(async move {
+            while let Ok(found) = rx.recv().await {
                 let Some(v) = view() else { return };
                 let s = &v.search;
                 if s.token.get() != token {
                     return;
                 }
-                // Start at the first hit on or after the page being read.
-                let first = hits.iter().position(|h| h.page >= start).or(if hits.is_empty() { None } else { Some(0) });
-                *s.hits.borrow_mut() = hits;
-                s.cur.set(first);
-                s.paint();
-                s.show_current(true);
-            },
-        );
+                match found {
+                    Found::Page(page, hits) => s.add(page, hits, n),
+                    Found::Done => {
+                        s.busy.set(false);
+                        if s.cur.get().is_none() && !s.hits.borrow().is_empty() {
+                            // Nothing after the page being read: wrap round to the first match.
+                            s.cur.set(Some(0));
+                            s.paint();
+                            s.show_current(true);
+                        } else {
+                            s.show_current(false);
+                        }
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
+    /// Matches from one more page arrived (pages come in order).
+    fn add(&self, page: usize, hits: Vec<Hit>, n_pages: usize) {
+        if !hits.is_empty() {
+            let first_new = self.hits.borrow().len();
+            self.hits.borrow_mut().extend(hits);
+            let jump = self.cur.get().is_none() && page >= self.start.get();
+            if jump {
+                self.cur.set(Some(first_new));
+            }
+            self.paint();
+            if jump {
+                self.show_current(true);
+            }
+        }
+        if self.busy.get() {
+            self.show_progress(page + 1, n_pages);
+        }
+    }
+
+    fn show_progress(&self, done: usize, n_pages: usize) {
+        let n = self.hits.borrow().len();
+        let pct = done * 100 / n_pages.max(1);
+        let found = match self.cur.get() {
+            Some(i) => format!("{} / {n}", i + 1),
+            None if n > 0 => format!("{n} found"),
+            None => "Searching".to_string(),
+        };
+        self.readout.set_text(&format!("{found} · {pct}%"));
     }
 
     fn paint(&self) {
@@ -180,12 +293,14 @@ impl Search {
         let n = self.hits.borrow().len();
         match self.cur.get() {
             Some(i) if n > 0 => {
-                self.readout.set_text(&format!("{} / {n}", i + 1));
+                let more = if self.busy.get() { "+" } else { "" };
+                self.readout.set_text(&format!("{} / {n}{more}", i + 1));
                 if scroll && let Some(v) = view() {
                     let h = self.hits.borrow()[i];
                     reveal(&v, h);
                 }
             }
+            _ if self.busy.get() => {}
             _ => self.readout.set_text(if self.entry.text().trim().is_empty() { "" } else { "No matches" }),
         }
     }
@@ -195,7 +310,7 @@ impl Search {
 fn reveal(v: &std::rc::Rc<super::View>, h: Hit) {
     let Some(d) = doc::current() else { return };
     d.set_page(h.page);
-    if !crate::prefs::get().continuous {
+    if !v.continuous() {
         v.goto_page(h.page);
     }
     let adj = v.scroller.vadjustment();
@@ -210,7 +325,6 @@ fn reveal(v: &std::rc::Rc<super::View>, h: Hit) {
             v2.programmatic.set(false);
         }
         v2.queue_visible();
-        let _ = PAD_Y;
     });
 }
 
@@ -227,21 +341,51 @@ fn step(dir: i32) {
     s.show_current(true);
 }
 
-/// Every match of `query` in the file, with its place on the displayed page.
-fn find_all(path: &std::path::Path, password: Option<&str>, query: &str) -> Vec<Hit> {
+/// Notes and text boxes whose text contains `query`, as hits on their pages.
+fn annotation_hits(query: &str, case: bool) -> Vec<Hit> {
+    let Some(lo) = view().and_then(|v| v.lo()) else { return Vec::new() };
+    let fold = |s: &str| if case { s.to_string() } else { s.to_lowercase() };
+    let q = fold(query);
+    annots::read_all(&lo)
+        .into_iter()
+        .filter(|(_, a)| a.kind.has_text() && a.kind != annots::Kind::Edit && fold(&a.contents).contains(&q))
+        .map(|(page, a)| Hit { page, rect: a.rect })
+        .collect()
+}
+
+/// Every match of `query` in the file, page by page, with its place on the displayed
+/// page. Runs on its own thread; `notes` are merged in on their pages.
+fn find_all(
+    path: &std::path::Path,
+    password: Option<&str>,
+    query: &str,
+    flags: poppler::FindFlags,
+    notes: Vec<Hit>,
+    cancel: &AtomicBool,
+    tx: &async_channel::Sender<Found>,
+) {
     use gtk::gio::prelude::FileExt;
     let uri = gtk::gio::File::for_path(path).uri();
-    let Ok(pdf) = poppler::Document::from_file(&uri, password) else { return Vec::new() };
-    let mut out = Vec::new();
-    for i in 0..pdf.n_pages() {
-        let Some(page) = pdf.page(i) else { continue };
-        let (_, ph) = page.size();
-        for r in page.find_text(query) {
+    if let Ok(pdf) = poppler::Document::from_file(&uri, password) {
+        for i in 0..pdf.n_pages() {
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            let Some(page) = pdf.page(i) else { continue };
+            let (_, ph) = page.size();
             // Poppler gives these with y up.
-            out.push(Hit { page: i as usize, rect: Rect::new(r.x1(), ph - r.y2(), r.x2(), ph - r.y1()) });
+            let mut hits: Vec<Hit> = page
+                .find_text_with_options(query, flags)
+                .into_iter()
+                .map(|r| Hit { page: i as usize, rect: Rect::new(r.x1(), ph - r.y2(), r.x2(), ph - r.y1()) })
+                .collect();
+            hits.extend(notes.iter().filter(|h| h.page == i as usize).copied());
+            if tx.send_blocking(Found::Page(i as usize, hits)).is_err() {
+                return;
+            }
         }
     }
-    out
+    let _ = tx.send_blocking(Found::Done);
 }
 
 impl Search {

@@ -40,6 +40,16 @@ pub fn build(page: &Page) {
         crate::viewer::relayout();
     });
     g.add(&r);
+    g.add(&widgets::segmented_row(
+        "Pages side by side",
+        "Two pages at a time, or like a book with page one on its own. Also in the layout menu above the pages.",
+        widgets::opts(&[("single", "Single"), ("pairs", "Two pages"), ("book", "Book")]),
+        &p.spread,
+        |v| {
+            prefs::update(|p| p.spread = v);
+            crate::viewer::rebuild();
+        },
+    ));
     let (r, _) = widgets::switch_row("Remember the page", "Open each file on the page you left it on.", p.remember_page, |on| {
         prefs::update(|p| p.remember_page = on)
     });
@@ -69,16 +79,21 @@ pub fn build(page: &Page) {
     // ----- Files -----
     let g = page.group("Files");
     let cache = paths::cache_dir();
-    let size = dir_size(&cache);
-    let (r, _) = widgets::button_row(
-        "Clear cache",
-        &format!("Covers and working copies of open files, {} now.", fmt::size(size)),
-        "Clear",
-        |_| {
-            crate::sections::library::clear_covers();
-            crate::window::toast("Cleared the cover cache.");
-        },
-    );
+    let describe = move || {
+        format!(
+            "Library covers, and copies of files left from earlier runs (with any changes that weren't saved). {} now.",
+            fmt::size(dir_size(&cache))
+        )
+    };
+    let (r, _) = widgets::button_row("Clear cache", &describe(), "Clear", move |b| {
+        crate::sections::library::clear_covers();
+        let n = crate::doc::clear_leftovers();
+        crate::window::toast(&if n == 0 { "Cleared the covers.".to_string() } else { format!("Cleared the covers and {}.", fmt::count(n, "old copy", "old copies")) });
+        // Update the size in the description.
+        if let Some(desc) = b.parent().and_then(|row| row.first_child()).and_then(|text| text.last_child()).and_downcast::<gtk::Label>() {
+            desc.set_text(&describe());
+        }
+    });
     g.add(&r);
 
     // ----- This window -----
@@ -123,7 +138,7 @@ pub fn build(page: &Page) {
             while let Some(c) = swatches.first_child() {
                 swatches.remove(&c);
             }
-            let pal = theme::current_palette();
+            let pal = theme::palette();
             for c in [&pal.bg, &pal.surface, &pal.muted, &pal.text, &pal.accent, &pal.danger] {
                 let s = gtk::Box::new(gtk::Orientation::Horizontal, 0);
                 s.add_css_class("swatch");
@@ -136,19 +151,7 @@ pub fn build(page: &Page) {
         }
     };
     refresh_swatches();
-    let last = std::cell::RefCell::new(theme::current_palette());
-    let weak = swatches.downgrade();
-    glib::timeout_add_seconds_local(1, move || {
-        if weak.upgrade().is_none() {
-            return glib::ControlFlow::Break;
-        }
-        let now = theme::current_palette();
-        if *last.borrow() != now {
-            *last.borrow_mut() = now;
-            refresh_swatches();
-        }
-        glib::ControlFlow::Continue
-    });
+    theme::subscribe(&swatches, refresh_swatches);
     g.add(&widgets::row("Current colours", "", Some(swatches.upcast_ref())));
 
     let (r, _) = widgets::switch_row("Glow", "Soft accent glow around focused and selected elements.", p.glow, |on| {
@@ -166,27 +169,42 @@ pub fn build(page: &Page) {
     // ----- Keyboard -----
     let g = page.group("Keyboard");
     for (keys, what) in [
-        (&["Ctrl", "O"][..], "Open a file"),
+        (&["Ctrl", "O"][..], "Open files (each in its own tab)"),
         (&["Ctrl", "S"][..], "Save"),
         (&["Ctrl", "Shift", "S"][..], "Save a copy as…"),
+        (&["Ctrl", "P"][..], "Print"),
+        (&["Ctrl", "W"][..], "Close the file"),
+        (&["Ctrl", "Tab"][..], "Next file (with Shift, the one before)"),
         (&["Ctrl", "Z"][..], "Undo"),
         (&["Ctrl", "Shift", "Z"][..], "Redo"),
+        (&["Ctrl", "C"][..], "Copy the selected text"),
         (&["Ctrl", "F"][..], "Search the document"),
         (&["Ctrl", "+"][..], "Zoom in"),
         (&["Ctrl", "−"][..], "Zoom out"),
         (&["Ctrl", "0"][..], "Fit width"),
-        (&["PgUp"][..], "Previous page"),
-        (&["PgDn"][..], "Next page"),
+        (&["Ctrl", "9"][..], "Fit page"),
+        (&["PgUp"][..], "Previous page (also K, Shift+Space)"),
+        (&["PgDn"][..], "Next page (also J, Space)"),
+        (&["Home"][..], "First page"),
+        (&["End"][..], "Last page"),
+        (&["Alt", "←"][..], "Back to where you were (after a link)"),
+        (&["Alt", "→"][..], "Forward again"),
+        (&["F5"][..], "Present"),
         (&["F9"][..], "Show or hide the side panel"),
         (&["F11"][..], "Fullscreen"),
+        (&["Ctrl", "B"][..], "Collapse or expand the sidebar"),
         (&["V"][..], "Select tool"),
         (&["H"][..], "Highlight tool"),
+        (&["U"][..], "Underline tool"),
+        (&["X"][..], "Strike-out tool"),
         (&["D"][..], "Draw tool"),
         (&["N"][..], "Note tool"),
         (&["T"][..], "Text box tool"),
         (&["E"][..], "Edit text tool"),
-        (&["Esc"][..], "Back to Select, or clear the search"),
-        (&["Ctrl", "Q"][..], "Close"),
+        (&["S"][..], "Signature tool"),
+        (&["Delete"][..], "Delete the selected markup"),
+        (&["Esc"][..], "Back to Select, close the search, or stop presenting"),
+        (&["Ctrl", "Q"][..], "Quit"),
     ] {
         g.add(&widgets::row(what, "", Some(widgets::key_caps(keys).upcast_ref())));
     }

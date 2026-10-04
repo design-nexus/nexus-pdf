@@ -5,8 +5,10 @@ use crate::doc::{self, render};
 use gtk::gdk;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
-type Key = (usize, usize, u32);
+/// The generation's file (which names the open copy and the edit), page and width.
+type Key = (PathBuf, usize, u32);
 
 thread_local! {
     static CACHE: RefCell<HashMap<Key, gdk::Texture>> = RefCell::new(HashMap::new());
@@ -16,7 +18,7 @@ thread_local! {
 /// cached, otherwise when it's been drawn.
 pub fn get(page: usize, width: u32, done: impl FnOnce(gdk::Texture) + 'static) -> Option<render::Ticket> {
     let doc = doc::current()?;
-    let key = (doc.generation(), page, width);
+    let key = (doc.gen_path(), page, width);
     if let Some(t) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
         done(t);
         return None;
@@ -34,6 +36,7 @@ pub fn get(page: usize, width: u32, done: impl FnOnce(gdk::Texture) + 'static) -
             let mut c = c.borrow_mut();
             // Old generations are never asked for again.
             c.retain(|k, _| k.0 == key.0);
+            // (Other open files draw theirs again when their tab is shown.)
             c.insert(key, t.clone());
         });
         done(t);

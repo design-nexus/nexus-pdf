@@ -9,17 +9,21 @@ use gtk::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-const THUMB_W: i32 = 150;
+/// The panel's width less its padding: what a thumbnail gets.
+fn thumb_w(panel_w: i32) -> i32 {
+    (panel_w - 86).max(80)
+}
 
 pub struct Panel {
     pub root: gtk::Box,
-    stack: gtk::Stack,
     thumbs: gtk::Box,
     thumbs_scroll: gtk::ScrolledWindow,
     items: RefCell<Vec<Thumb>>,
     outline: gtk::Box,
     markup: gtk::Box,
     active: Cell<usize>,
+    tabs: Vec<(String, gtk::ToggleButton)>,
+    width: Cell<i32>,
 }
 
 struct Thumb {
@@ -41,7 +45,8 @@ impl Panel {
     pub fn new() -> Panel {
         let root = widgets::vbox(0);
         root.add_css_class("side-panel");
-        root.set_size_request(236, -1);
+        let width = crate::prefs::get().panel_width;
+        root.set_size_request(width, -1);
         root.set_hexpand(false);
 
         let stack = gtk::Stack::new();
@@ -49,18 +54,24 @@ impl Panel {
         stack.set_transition_type(gtk::StackTransitionType::Crossfade);
         stack.set_transition_duration(if crate::prefs::get().reduce_motion { 0 } else { 160 });
 
-        let seg = widgets::segmented(
-            &widgets::opts(&[("thumbs", "Pages"), ("outline", "Outline"), ("markup", "Markup")]),
-            "thumbs",
-            {
-                let stack = stack.clone();
-                move |id| stack.set_visible_child_name(&id)
-            },
-        );
+        let names = ["thumbs", "outline", "markup"];
+        let tab = crate::prefs::get().panel_tab;
+        let tab = if names.contains(&tab.as_str()) { tab } else { "thumbs".to_string() };
+        let seg = widgets::segmented(&widgets::opts(&[("thumbs", "Pages"), ("outline", "Outline"), ("markup", "Markup")]), &tab, {
+            let stack = stack.clone();
+            move |id| {
+                stack.set_visible_child_name(&id);
+                crate::prefs::update(|p| p.panel_tab = id);
+            }
+        });
         seg.set_halign(gtk::Align::Fill);
         seg.add_css_class("panel-tabs");
-        for b in std::iter::successors(seg.first_child(), |w| w.next_sibling()) {
+        let mut tabs = Vec::new();
+        for (b, name) in std::iter::successors(seg.first_child(), |w| w.next_sibling()).zip(names) {
             b.set_hexpand(true);
+            if let Ok(t) = b.downcast::<gtk::ToggleButton>() {
+                tabs.push((name.to_string(), t));
+            }
         }
         root.append(&seg);
 
@@ -75,8 +86,19 @@ impl Panel {
         markup.add_css_class("markup-list");
         stack.add_named(&scroller(&markup), Some("markup"));
         root.append(&stack);
+        stack.set_visible_child_name(&tab);
 
-        let p = Panel { root, stack, thumbs, thumbs_scroll, items: RefCell::new(Vec::new()), outline, markup, active: Cell::new(usize::MAX) };
+        let p = Panel {
+            root,
+            thumbs,
+            thumbs_scroll,
+            items: RefCell::new(Vec::new()),
+            outline,
+            markup,
+            active: Cell::new(usize::MAX),
+            tabs,
+            width: Cell::new(width),
+        };
         p.thumbs_scroll.vadjustment().connect_value_changed(|_| {
             if let Some(v) = view() {
                 v.panel.load_visible_thumbs();
@@ -90,9 +112,18 @@ impl Panel {
         p
     }
 
-    /// Show one of "thumbs", "outline" or "markup" (the segmented control follows by hand).
+    /// Show one of "thumbs", "outline" or "markup".
     pub fn show(&self, name: &str) {
-        self.stack.set_visible_child_name(name);
+        if let Some((_, b)) = self.tabs.iter().find(|(n, _)| n == name) {
+            b.set_active(true);
+        }
+    }
+
+    /// The panel was resized: thumbnails follow.
+    pub fn set_width(&self, w: i32) {
+        if self.width.replace(w) != w {
+            self.build_thumbs();
+        }
     }
 
     /// Rebuild all three lists for the document that's open.
@@ -108,6 +139,7 @@ impl Panel {
         }
         self.items.borrow_mut().clear();
         let Some(d) = doc::current() else { return };
+        let tw = thumb_w(self.width.get());
         for i in 0..d.n_pages() {
             let (w, h) = d.page_size(i);
             let button = gtk::Button::new();
@@ -116,9 +148,10 @@ impl Panel {
             let card = widgets::vbox(4);
             let picture = gtk::Picture::new();
             picture.add_css_class("thumb-picture");
+            picture.add_css_class("loading");
             picture.set_can_shrink(true);
             picture.set_content_fit(gtk::ContentFit::Fill);
-            picture.set_size_request(THUMB_W, (f64::from(THUMB_W) * h / w.max(1.0)).round() as i32);
+            picture.set_size_request(tw, (f64::from(tw) * h / w.max(1.0)).round() as i32);
             let label = widgets::label(&(i + 1).to_string(), "mono");
             label.add_css_class("thumb-number");
             label.set_halign(gtk::Align::Center);
@@ -127,7 +160,8 @@ impl Panel {
             button.set_child(Some(&card));
             button.connect_clicked(move |_| {
                 if let Some(v) = view() {
-                    v.goto_page(i);
+                    v.jump(i);
+                    v.panel_used();
                 }
             });
             self.thumbs.append(&button);
@@ -148,6 +182,7 @@ impl Panel {
         let adj = self.thumbs_scroll.vadjustment();
         let (top, h) = (adj.value(), adj.page_size().max(1.0));
         let scale = self.root.scale_factor().max(1);
+        let tw = thumb_w(self.width.get());
         for (i, t) in self.items.borrow().iter().enumerate() {
             if t.loaded.get() {
                 continue;
@@ -159,7 +194,10 @@ impl Panel {
                 let pic = t.picture.clone();
                 let loaded = t.loaded.clone();
                 // Keep the ticket alive by leaking it into the callback's lifetime: the cache owns the result.
-                let ticket = super::thumbs::get(i, (THUMB_W * scale) as u32, move |tex| pic.set_paintable(Some(&tex)));
+                let ticket = super::thumbs::get(i, (tw * scale) as u32, move |tex| {
+                    pic.set_paintable(Some(&tex));
+                    pic.remove_css_class("loading");
+                });
                 if ticket.is_none() {
                     loaded.set(true);
                 }
@@ -216,6 +254,7 @@ impl Panel {
         }
         let Some(v) = view() else { return };
         let all = v.lo().map(|lo| annots::read_all(&lo)).unwrap_or_default();
+        let pdf = doc::current().map(|d| d.pdf());
         if all.is_empty() {
             let l = widgets::label("Nothing marked up yet. Use the tools above the page.", "dim");
             l.set_wrap(true);
@@ -231,7 +270,7 @@ impl Panel {
             let card = widgets::vbox(2);
             let head = widgets::label(&format!("{} · page {}", a.kind.label(), page + 1), "markup-title");
             card.append(&head);
-            let snippet = markup_text(&a.contents, a.rect, a.kind);
+            let snippet = markup_text(pdf.as_ref(), page, &a);
             if !snippet.is_empty() {
                 let s = widgets::label(&snippet, "dim");
                 s.set_ellipsize(gtk::pango::EllipsizeMode::End);
@@ -245,8 +284,9 @@ impl Panel {
             button.connect_clicked(move |_| {
                 if let Some(v) = view() {
                     *v.annot_sel.borrow_mut() = Some(AnnotSel { page, id });
-                    v.goto_page(page);
+                    v.jump(page);
                     super::pageview::queue_all(&v);
+                    v.panel_used();
                 }
             });
             self.markup.append(&button);
@@ -254,8 +294,27 @@ impl Panel {
     }
 }
 
-fn markup_text(contents: &str, _rect: Rect, _kind: annots::Kind) -> String {
-    contents.trim().replace('\n', " ")
+/// What to show for an annotation in the list: its own text, or for text markup,
+/// the words it covers.
+fn markup_text(pdf: Option<&poppler::Document>, page: usize, a: &annots::AnnotInfo) -> String {
+    let own = a.contents.trim();
+    if !own.is_empty() {
+        return own.replace('\n', " ");
+    }
+    if !matches!(a.kind, annots::Kind::Highlight | annots::Kind::Underline | annots::Kind::StrikeOut) {
+        return String::new();
+    }
+    let Some(p) = pdf.and_then(|pdf| pdf.page(page as i32)) else { return String::new() };
+    // The annotation's box is a point bigger than the text all round.
+    let r: Rect = a.rect.inflate(-1.0);
+    let mut area = poppler::Rectangle::new();
+    area.set_x1(r.x0);
+    area.set_y1(r.y0);
+    area.set_x2(r.x1);
+    area.set_y2(r.y1);
+    let text = p.selected_text(poppler::SelectionStyle::Glyph, &mut area).map(|t| t.to_string()).unwrap_or_default();
+    let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if words.is_empty() { String::new() } else { format!("“{words}”") }
 }
 
 fn outline_list(items: &[Outline], depth: i32) -> gtk::Box {
@@ -290,7 +349,8 @@ fn outline_list(items: &[Outline], depth: i32) -> gtk::Box {
         if let Some(p) = it.page {
             title.connect_clicked(move |_| {
                 if let Some(v) = view() {
-                    v.goto_page(p);
+                    v.jump(p);
+                    v.panel_used();
                 }
             });
         }

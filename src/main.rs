@@ -22,7 +22,7 @@ pub const APP_ID: &str = "io.github.design_nexus.Pdf";
 
 const USAGE: &str = "Usage: pdf [OPTIONS] [FILE…]\n\
 \n\
-  FILE            open this PDF\n\
+  FILE            open this PDF (several files open in tabs)\n\
   --page N        open FILE on page N (1 is the first)\n\
   --section ID    open (or switch the open window) to a page: library, document, pages, settings\n\
   --toggle        close the window if it's open, otherwise open it (for a keybinding)\n";
@@ -78,14 +78,16 @@ fn main() -> glib::ExitCode {
             return glib::ExitCode::SUCCESS;
         }
         window::present(app, section.as_deref().or(if files.is_empty() { None } else { Some("document") }));
-        if let Some(path) = files.pop() {
-            doc::request_open(path, page);
+        // Every file gets a tab; --page applies to the last one, which ends up showing.
+        let last = files.len().saturating_sub(1);
+        for (i, path) in files.into_iter().enumerate() {
+            doc::request_open(path, if i == last { page } else { None });
         }
         glib::ExitCode::SUCCESS
     });
     app.connect_shutdown(|_| {
         prefs::flush();
-        doc::close();
+        doc::close_all();
     });
     app.run()
 }

@@ -29,6 +29,8 @@ struct Job {
     /// Pixels per point.
     scale: f64,
     colors: Colors,
+    /// Draw only this part of the page (points from the top-left: x, y, width, height).
+    clip: Option<[f64; 4]>,
 }
 
 struct Done {
@@ -107,6 +109,21 @@ pub fn request(
     priority: u8,
     done: impl FnOnce(gdk::Texture) + 'static,
 ) -> Ticket {
+    request_area(path, password, page, scale, colors, priority, None, done)
+}
+
+/// Like `request`, but only the part of the page in `clip` (points: x, y, width, height).
+#[allow(clippy::too_many_arguments)]
+pub fn request_area(
+    path: PathBuf,
+    password: Option<String>,
+    page: usize,
+    scale: f64,
+    colors: Colors,
+    priority: u8,
+    clip: Option<[f64; 4]>,
+    done: impl FnOnce(gdk::Texture) + 'static,
+) -> Ticket {
     STATE.with(|s| {
         let mut s = s.borrow_mut();
         let st = s.get_or_insert_with(start);
@@ -114,7 +131,7 @@ pub fn request(
         st.next += 1;
         st.waiting.insert(id, Box::new(done));
         let cancel = Arc::new(AtomicBool::new(false));
-        st.queue.jobs.lock().unwrap().push(Job { id, priority, cancel: cancel.clone(), path, password, page, scale, colors });
+        st.queue.jobs.lock().unwrap().push(Job { id, priority, cancel: cancel.clone(), path, password, page, scale, colors, clip });
         st.queue.wake.notify_one();
         Ticket { cancel, id }
     })
@@ -140,7 +157,7 @@ fn worker(queue: Arc<Queue>, tx: async_channel::Sender<Done>) {
         }
         let Some((_, doc)) = &open else { continue };
         let Some(page) = doc.page(job.page as i32) else { continue };
-        if let Some(done) = draw(job.id, &page, job.scale, job.colors)
+        if let Some(done) = draw(job.id, &page, job.scale, job.colors, job.clip)
             && tx.send_blocking(done).is_err()
         {
             return;
@@ -148,15 +165,17 @@ fn worker(queue: Arc<Queue>, tx: async_channel::Sender<Done>) {
     }
 }
 
-fn draw(id: u64, page: &poppler::Page, scale: f64, colors: Colors) -> Option<Done> {
+fn draw(id: u64, page: &poppler::Page, scale: f64, colors: Colors, clip: Option<[f64; 4]>) -> Option<Done> {
     let (w, h) = page.size();
-    let (pw, ph) = (((w * scale).ceil() as i32).max(1), ((h * scale).ceil() as i32).max(1));
+    let [x, y, cw, ch] = clip.unwrap_or([0.0, 0.0, w, h]);
+    let (pw, ph) = (((cw * scale).ceil() as i32).max(1), ((ch * scale).ceil() as i32).max(1));
     let mut surface = gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, pw, ph).ok()?;
     {
         let cr = gtk::cairo::Context::new(&surface).ok()?;
         cr.set_source_rgb(1.0, 1.0, 1.0);
         cr.paint().ok()?;
-        cr.scale(pw as f64 / w, ph as f64 / h);
+        cr.scale(pw as f64 / cw, ph as f64 / ch);
+        cr.translate(-x, -y);
         page.render(&cr);
     }
     surface.flush();

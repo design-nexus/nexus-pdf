@@ -400,7 +400,7 @@ pub fn empty_state(icon: &str, title: &str, desc: &str, action: Action<'_>) -> g
     b
 }
 
-/// Ask for a line of text in a small dialog ("Not now" first, then the action).
+/// Ask for a line of text in a small dialog ("Cancel" first, then the action).
 pub fn ask_text(title: &str, desc: &str, initial: &str, confirm: &str, on_ok: impl Fn(String) + 'static) -> gtk::Box {
     let (dialog, card) = dialog(title, 420);
     if !desc.is_empty() {
@@ -417,7 +417,7 @@ pub fn ask_text(title: &str, desc: &str, initial: &str, confirm: &str, on_ok: im
     let buttons = hbox(8);
     buttons.set_halign(gtk::Align::End);
     buttons.set_margin_top(6);
-    let cancel = gtk::Button::with_label("Not now");
+    let cancel = gtk::Button::with_label("Cancel");
     let ok = gtk::Button::with_label(confirm);
     ok.add_css_class("suggested-action");
     buttons.append(&cancel);
